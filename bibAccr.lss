@@ -1,0 +1,3234 @@
+Sub MetaDataSendMail(doc As NotesDocument,stream As NotesStream)
+ Call FindOriginator(doc,stream) 	' Ответственный исполнитель
+ If doc.GetItemValue ("IsReviewTerm")(0) <> "0" Then
+  Dim DT As NotesDateTime
+  Dim item As NotesItem
+  Set item=doc.GetFirstItem("DateSended")
+  Set DT = item.DateTimeValue
+  '
+  If doc.Weekend(0)="0" Then
+   days = Cint (doc.ReviewTime (0))+GetWeekend(doc,"DateSended",doc.ReviewTime(0))
+  Else
+   days = Cint (doc.ReviewTime (0))
+  End If
+  Call DT.AdjustDay (days)
+  stream.WriteText {<TR><TD><b>Срок ответа:</b><TD>}+DT.DateOnly
+ Else
+  stream.WriteText {<TR><TD><b>Срок ответа:</b><TD>не ограничен} 
+ End If
+ FormName=doc.Form(0)
+ if doc.Contragent(0)<>"" then
+  stream.WriteText {<TR><TD><b>Застройщик:</b><TD>}+doc.Contragent(0)
+ end if
+ if doc.Object(0)<>"" then
+  stream.WriteText {<TR><TD><b>Объект:</b><TD>}+doc.Object(0)
+ end if
+ if doc.Address(0)<>"" then
+  stream.WriteText {<TR><TD><b>Адрес объекта:</b><TD>}+doc.Address(0)
+ end if
+ Call FindCategory(doc,stream)		' Категория документа
+ If doc.GetItemValue ("Target")(0) <> "" Then
+  stream.WriteText {<TR><TD><b>Цель:</b><TD>}+doc.Target(0) 
+ End If
+ If doc.GetItemValue ("DocType")(0) <> "" Then
+  stream.WriteText {<TR><TD><b>Тип документа:</b><TD>}+doc.DocType(0) 
+ End If
+  ' Комментарий автора
+  If doc.Comment(0)="" Then
+   Dim OriginatorComment As NotesItem
+   Set OriginatorComment=doc.GetFirstItem("OriginatorComment")
+   If OriginatorComment.Text<>"" Then
+    stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & OriginatorComment.Text  & {</FONT>}
+   End If
+ Else
+  stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & doc.Comment(0)   & {</FONT>}
+ End If
+End Sub
+
+'
+' Рассылка первой версии договора на согласование
+' doc    -  Согласуемый документ
+' SendTo -  Рецензент
+Sub SendMail(doc As NotesDocument, SendTo As Variant)
+ Dim db As NotesDatabase
+ Dim s As New NotesSession
+ '
+ Set db=doc.ParentDatabase
+ ' Рассылка в Outlook
+ InternetAddress=GetInternetAddress(SendTo)
+ If InternetAddress<>"" Then
+  Dim noticeEx As NotesDocument
+  Dim stream As NotesStream
+  Dim mimeE As NotesMIMEEntity
+  Dim bodyE As NotesMIMEEntity
+  Set noticeEx= New NotesDocument (db)
+  noticeEx.Subject={Tребуется рецензия: "} & doc.GetItemValue ("Subject")(0) & {"}
+  noticeEx.SendTo=InternetAddress
+  '
+  Set bodyE = noticeEx.CreateMIMEEntity("Body")
+  Set mimeE = bodyE.CreateChildEntity 				
+  Set stream = s.CreateStream
+  Call HelloWorldBIB(stream,InternetAddress)
+  Call stream.WriteText({Пожалуйста, найдите время для рецензирования этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+  stream.WriteText {<TABLE border="1" cols="2">}
+  Call MetaDataSendMail(doc,stream)
+  stream.WriteText {</TABLE>}	
+  Call stream.WriteText({<br><i>Для открытия этого документа через <b>Web</b> нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".</i><br><br>})	
+  Call AutoSignBIB(stream)
+  Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+  Call noticeEx.Send (False)		
+ End If
+End Sub
+
+
+'
+' Рассылка не первой версии договора на согласование
+' doc         -  Согласуемый документ
+' SendTo -  Рецензент
+Sub SendMailVersions(doc As NotesDocument, SendTo As Variant)
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+     '
+	Set db=doc.ParentDatabase
+ 	'
+	ApproveVersion=doc.ApproveVersion(0)
+	' Поиск последней рецензии
+	Dim CommentDoc As NotesDocument, Resp As NotesDocument
+	Dim vc As NotesViewEntryCollection
+	Dim ve As NotesViewEntry
+	Dim ParentDoc As NotesDocument
+	Dim view As NotesView		
+	Set view=db.GetView("DBRefFormCoLNLookup")
+	Call view.Refresh
+	Set vc = view.GetAllEntriesByKey(doc.UniversalID+"Response", False)	
+	If vc.Count=0 Then
+		Set vc = view.GetAllEntriesByKey(doc.AUNID(0)+"Response", False)	
+		Set ParentDoc = db.GetView("UNID").GetDocumentByKey(doc.AUNID(0))
+	End If
+	If Not ParentDoc Is Nothing Then
+		Set CommentDoc=view.GetDocumentByKey(ParentDoc.UniversalID+"Comment"+SendTo,True)
+	End If
+	If CommentDoc Is Nothing Then
+		If vc.Count>0 Then
+			Set ve=vc.GetLastEntry
+			Do Until ve Is Nothing
+				Set Resp=ve.Document	
+				Set CommentDoc=view.GetDocumentByKey(Resp.UniversalID+"Comment"+SendTo,True)
+				If Not CommentDoc Is Nothing Then
+					Exit Do		
+				End If
+				Set ve=vc.GetPrevEntry(ve)		
+			Loop
+		End If
+	End If
+ 	' Рассылка в Outlook
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		noticeEx.Subject="Требуется рецензия: " & {"} & doc.GetItemValue ("Subject")(0) & {"}+"; Версия"+Cstr(doc.Version(0))
+		noticeEx.SendTo=InternetAddress
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		Call stream.WriteText({Пожалуйста, найдите время для рецензирования этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br>})
+		If Not CommentDoc Is Nothing Then
+			If (CommentDoc.Decision(0)="Согласен") Then
+				If ApproveVersion="1" Then
+					Call stream.WriteText({Ранее вы уже высказывались по этому документу в предыдущих версиях и поэтому рецензировать документ повторно <FONT COLOR="#0000FF"><b>не обязательно!</b></FONT><br><br>})
+				Else
+					Call stream.WriteText({Ранее вы уже высказывались по этому документу в предыдущих версиях, но ответственный установил параметры обязательного повторного рецензирования!<br><br>})   	
+				End If			
+			Else
+				Call stream.WriteText({<br>})				
+			End If			
+		Else
+			Call stream.WriteText({<br>})
+		End If
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call MetaDataSendMail(doc,stream)
+		stream.WriteText {<TR><TD><b>Версия согласования:</b><TD><FONT COLOR="#008B00">}+Cstr(doc.Version(0))+{</FONT>}
+		stream.WriteText {</TABLE>}
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)
+	End If
+End Sub
+
+Sub NotifyEnd(doc As NotesDocument, SendTo As Variant)
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+ 	'
+	Set db=doc.ParentDatabase
+	 ' Рассылка в Outlook
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		If doc.Version(0)=1 Then
+			noticeEx.Subject={Завершено рецензирование: "} & doc.GetItemValue ("Subject")(0)+{"}
+		Else
+			noticeEx.Subject={Завершено рецензирование: "} & doc.GetItemValue ("Subject")(0)+{"; Версия}+Cstr(doc.Version(0))
+		End If
+		noticeEx.SendTo=InternetAddress
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		Call stream.WriteText({Согласование этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>" <b>приостановлено</b>!<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call MetaDataSendMail(doc,stream)
+		If doc.Version(0)>1 Then
+			stream.WriteText {<TR><TD><b>Версия согласования:</b><TD><FONT COLOR="#008B00">}+Cstr(doc.Version(0))+{</FONT>}
+		End If
+		stream.WriteText {</TABLE>}
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)
+	End If
+End Sub
+
+Sub SendAddRev(doc As NotesDocument, SendTo As Variant,CommentDoc As NotesDocument)
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+ 	'
+	Set db=doc.ParentDatabase
+ 	'
+	Originator=doc.OriginatorAlt(0)
+	FIO=RefreshFirstName(Originator)
+ 	' Рассылка в Outlook
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		'InternetAddress="Dmitriy.Nikulin@omzglobal.com"
+		noticeEx.SendTo=InternetAddress
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Dim FileName As String		
+		Call GetRes("bibPersonal",FileName)
+		Dim EMailLookup As NotesView
+		Dim Pers As NotesDocument
+		If FileName<>"" Then
+			Dim Personal As New NotesDatabase( "", "" )
+			Call Personal.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+			If Personal.IsOpen Then
+				Set EMailLookup=Personal.GetView("EMail")
+				Set Pers=EMailLookup.GetDocumentByKey(InternetAddress)
+				If Not Pers Is Nothing Then
+					If Pers.Sex(0)="W" Then ' Женский пол
+						Title="Уважаемая "
+					Else ' Мужской пол
+						Title="Уважаемый "
+					End If
+					Call stream.WriteText(Title+Trim(Pers.FirstName(0)+" "+Pers.SecondName(0))+"!<br><br>")
+				End If
+			End If
+		End If
+		ReviewerInternetAddress=GetInternetAddress(CommentDoc.ReviewedAlt(0))
+		If ReviewerInternetAddress<>"" Then
+			Set Pers=EMailLookup.GetDocumentByKey(ReviewerInternetAddress)
+			If Not Pers Is Nothing Then
+				If Pers.Sex(0)="W" Then ' Женский пол
+					Sex="а"
+				End If
+			End If			
+		End If
+		stream.WriteText({<b>} & RefreshFirstName(CommentDoc.ReviewedAlt(0)) & {</b> добавил}+Sex+{ Вас в список рецензентов!})
+		Call stream.WriteText({ Пожалуйста, найдите время для рецензирования этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call MetaDataSendMail(doc,stream)
+		If CommentDoc.Comment(0)<>"" Then
+			stream.WriteText {<TR><TD><b>Комментарий к согласованию:</b><TD>}+CommentDoc.Comment(0)
+		End If
+		Dim CommentItem As NotesItem
+		Set CommentItem=CommentDoc.GetFirstItem("Body")
+		If CommentItem.Text<>"" Then
+			stream.WriteText {<TR><TD><b>Дополнительная информация:</b><TD>}+CommentItem.Text
+		End If
+		If doc.Version(0)=1 Then
+			noticeEx.Subject="Добавление в список рецензентов"+": """ & doc.GetItemValue ("Subject")(0) & {"}
+		Else
+			noticeEx.Subject="Добавление в список рецензентов"+": """ & doc.GetItemValue ("Subject")(0) & {"; Версия}+Cstr(doc.Version(0))
+			stream.WriteText {<TR><TD><b>Версия согласования:</b><TD><FONT COLOR="#008B00">}+Cstr(doc.Version(0))+{</FONT>}
+		End If
+		stream.WriteText {</TABLE>}
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})		
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)	
+	End If
+End Sub
+
+
+Sub SendRemoveRev(doc As NotesDocument, SendTo As Variant,CommentDoc As NotesDocument)
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+ 	'
+	Set db=doc.ParentDatabase
+	'
+	Originator=doc.OriginatorAlt(0)
+	FIO=RefreshFirstName(Originator)
+ 	' Рассылка в Outlook
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		noticeEx.SendTo=InternetAddress
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Dim FileName As String		
+		Call GetRes("bibPersonal",FileName)
+		Dim EMailLookup As NotesView
+		Dim Pers As NotesDocument
+		If FileName<>"" Then
+			Dim Personal As New NotesDatabase( "", "" )
+			Call Personal.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+			If Personal.IsOpen Then
+				Set EMailLookup=Personal.GetView("EMail")
+				Set Pers=EMailLookup.GetDocumentByKey(InternetAddress)
+				If Not Pers Is Nothing Then
+					If Pers.Sex(0)="W" Then ' Женский пол
+						Title="Уважаемая "
+					Else ' Мужской пол
+						Title="Уважаемый "
+					End If
+					Call stream.WriteText(Title+Trim(Pers.FirstName(0)+" "+Pers.SecondName(0))+"!<br><br>")
+				End If
+			End If
+		End If
+		ReviewerInternetAddress=GetInternetAddress(CommentDoc.ReviewedAlt(0))
+		If ReviewerInternetAddress<>"" Then
+			Set Pers=EMailLookup.GetDocumentByKey(ReviewerInternetAddress)
+			If Not Pers Is Nothing Then
+				If Pers.Sex(0)="W" Then ' Женский пол
+					Sex="а"
+				End If
+			End If			
+		End If
+		stream.WriteText({<b>} & RefreshFirstName(CommentDoc.ReviewedAlt(0)) & {</b> удалил}+Sex+{ Вас из списка рецензентов этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call MetaDataSendMail(doc,stream)
+		If CommentDoc.Comment(0)<>"" Then
+			stream.WriteText {<TR><TD><b>Комментарий:</b><TD>}+CommentDoc.Comment(0)
+		End If
+		Dim CommentItem As NotesItem
+		Set CommentItem=CommentDoc.GetFirstItem("Body")
+		If CommentItem.Text<>"" Then
+			stream.WriteText {<TR><TD><b>Дополнительная информация:</b><TD>}+CommentItem.Text
+		End If
+		If doc.Version(0)=1 Then
+			noticeEx.Subject="Удаление из списка рецензентов"+": """ & doc.GetItemValue ("Subject")(0) & {"}
+		Else
+			noticeEx.Subject="Удаление из списка рецензентов"+": """ & doc.GetItemValue ("Subject")(0) & {"; Версия}+Cstr(doc.Version(0))
+			stream.WriteText {<TR><TD><b>Версия согласования:</b><TD><FONT COLOR="#008B00">}+Cstr(doc.Version(0))+{</FONT>}
+		End If
+		stream.WriteText {</TABLE>}
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})		
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)		
+	End If
+End Sub
+
+
+Sub SendMailWithComment(doc As NotesDocument, SendTo As Variant,CommentDoc As NotesDocument)
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+	'
+	Set db=doc.ParentDatabase
+	'
+	Originator=doc.OriginatorAlt(0)
+	FIO=RefreshFirstName(Originator)
+	ReviewedAlt=RefreshFirstName(ReviewedAlt)
+   	' Рассылка в Outlook
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		'InternetAddress="Dmitriy.Nikulin@omzglobal.com"
+		noticeEx.SendTo=InternetAddress
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Dim FileName As String		
+		Call GetRes("bibPersonal",FileName)
+		Dim EMailLookup As NotesView
+		Dim Pers As NotesDocument
+		If FileName<>"" Then
+			Dim Personal As New NotesDatabase( "", "" )
+			Call Personal.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+			If Personal.IsOpen Then
+				Set EMailLookup=Personal.GetView("EMail")
+				Set Pers=EMailLookup.GetDocumentByKey(InternetAddress)
+				If Not Pers Is Nothing Then
+					If Pers.Sex(0)="W" Then ' Женский пол
+						Title="Уважаемая "
+					Else ' Мужской пол
+						Title="Уважаемый "
+					End If
+					Call stream.WriteText(Title+Trim(Pers.FirstName(0)+" "+Pers.SecondName(0))+"!<br><br>")
+				End If
+			End If
+		End If
+		ReviewerInternetAddress=GetInternetAddress(CommentDoc.ReviewedAlt(0))
+		If ReviewerInternetAddress<>"" Then
+			Set Pers=EMailLookup.GetDocumentByKey(ReviewerInternetAddress)
+			If Not Pers Is Nothing Then
+				If Pers.Sex(0)="W" Then ' Женский пол
+					Sex="а"
+				End If
+			End If			
+		End If
+		stream.WriteText({Рецензент: <b>} & RefreshFirstName(CommentDoc.ReviewedAlt(0))  & {</b> делегировал}+Sex+{ Вам свои полномочия!})
+		Call stream.WriteText({ Пожалуйста, найдите время для рецензирования этого документа: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call MetaDataSendMail(doc,stream)
+		If CommentDoc.Comment(0)<>"" Then
+			stream.WriteText {<TR><TD><b>Комментарий к делегированию:</b><TD>}+CommentDoc.Comment(0)
+		End If
+		Dim CommentItem As NotesItem
+		Set CommentItem=CommentDoc.GetFirstItem("Body")
+		If CommentItem.Text<>"" Then
+			stream.WriteText {<TR><TD><b>Дополнительная информация:</b><TD>}+CommentItem.Text
+		End If
+		If doc.Version(0)=1 Then
+			noticeEx.Subject={Требуется рецензия: "} & doc.GetItemValue ("Subject")(0) & {"}
+		Else
+			noticeEx.Subject={Требуется рецензия: "} & doc.GetItemValue ("Subject")(0) & {"; Версия}+Cstr(doc.Version(0))
+			stream.WriteText {<TR><TD><b>Версия согласования:</b><TD><FONT COLOR="#008B00">}+Cstr(doc.Version(0))+{</FONT>}
+		End If
+		stream.WriteText {</TABLE>}	
+		Call stream.WriteText({<br>Ссылки и комментарии расположены на закладке "Делегирование".})
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)				
+	End If
+End Sub
+
+Sub CreateNewDocument()
+	Dim w As New NotesUIWorkSpace
+	Dim uidoc As NotesUIDocument	
+	Dim session As New NotesSession  ' Текущая сессия
+	User=session.UserName
+	Dim db As NotesDatabase
+	Set db=session.CurrentDatabase
+	Dim NewDoc As NotesDocument
+	Set NewDoc=db.CreateDocument()
+	NewDoc.Form="Document"
+	NewDoc.Version=1
+
+ if DemoVersion() then
+  Exit Sub
+ End if
+
+
+	Call FromAuthor(NewDoc)
+	Set uidoc=w.EditDocument(True,NewDoc)
+	Call uidoc.Refresh()
+	Call w.ViewRefresh
+End Sub
+
+
+Sub CreateNewRelationDocument()
+	Dim session As New NotesSession  ' Текущая сессия
+	Dim db As NotesDatabase
+	Set db=session.CurrentDatabase
+	
+	Dim ParentDoc As NotesDocument
+	Dim col As NotesDocumentCollection
+	Set col=db.UnprocessedDocuments
+	Set ParentDoc=col.GetFirstDocument
+	
+	Dim w As New NotesUIWorkSpace
+	Dim uidoc As NotesUIDocument	
+	User=session.UserName
+	Dim NewDoc As NotesDocument
+	Set NewDoc=db.CreateDocument()
+	NewDoc.Form="RelationDoc"
+	Call NewDoc.MakeResponse(ParentDoc)
+	NewDoc.Version=1
+
+ if DemoVersion() then
+  Exit Sub
+ End if
+
+	Call FromAuthor(NewDoc)
+	Set uidoc=w.EditDocument(True,NewDoc)
+	Call uidoc.GotoField("Subject")
+	Call uidoc.Refresh()
+	Call w.ViewRefresh
+End Sub
+
+Sub SelectCategory
+	Dim w As New NotesUIWorkSpace
+	Dim db As NotesDatabase
+	Dim collection As NotesDocumentCollection
+    '
+	Set a = w.CurrentDatabase
+	Set db=a.Database
+	Set collection = w.PickListCollection(PICKLIST_CUSTOM, False,db.Server,db.FilePath,"Category","Категории договоров" ,"Выберите категорию")
+	If collection.Count>0 Then
+		Dim Doc As NotesDocument,CurrentDoc As NotesDocument
+		Dim CurrentUIDoc As NotesUIDocument
+		Set CurrentUIDoc=w.CurrentDocument
+		CurrentUIDoc.EditMode=True
+		Set CurrentDoc=CurrentUIDoc.Document
+		Dim cat As String
+		Set Doc = collection.GetFirstDocument()
+		Dim unid As String
+		unid = Doc.UniversalID
+		' Список регистраторов
+		Dim Office As NotesItem
+		Set Office=Doc.GetFirstItem("Reviewers")
+	     '
+		cat=GetPlaceName(Doc)
+		' Доступ
+		If Doc.ListControl(0)="1" Then
+			Call CurrentDoc.RemoveItem("Access_Readers")
+			Set Access_Readers= New NotesItem(CurrentDoc,"Access_Readers",doc.Access_Readers,1075)
+			Call CurrentDoc.RemoveItem("Access_Authors")
+			Set Access_Authors= New NotesItem(CurrentDoc,"Access_Authors",doc.Access_Authors,1076)
+		End If
+		Call CurrentDoc.ReplaceItemValue("Category",cat)				
+		Call CurrentDoc.ReplaceItemValue("CategoryUNID",unid)
+		Call CurrentDoc.ReplaceItemValue("Office",Office) ' Регистраторы
+		Call CurrentUIDoc.Refresh
+	End If
+End Sub
+
+Sub ShowKontragent	
+	Dim w As New NotesUIWorkspace
+	Dim doc As NotesDocument
+	Set doc=w.CurrentDocument.Document
+	Dim db As NotesDatabase
+	Set db=doc.ParentDatabase
+	Dim FileName As String		
+	Call GetRes("bibContragents",FileName)
+	If FileName<>"" Then
+		Dim session As New NotesSession  ' Текущая сессия                 
+		Dim AK As New NotesDatabase( "", "" )
+		Call AK.OpenByReplicaID(session.CurrentDatabase.Server,Left(FileName,8)+Right(FileName,8))
+		If AK.IsOpen Then
+			Dim view As NotesView
+			Set view=AK.GetView("(Hidden)\UNID")
+ '
+			Dim FindDoc As NotesDocument	
+			Set FindDoc=view.GetDocumentByKey(doc.ContragentUNID(0),True)
+			If FindDoc Is Nothing Then
+				Set view=AK.GetView("(Hidden)\UNIDResp")
+				Set FindDoc=view.GetDocumentByKey(doc.ContragentUNID(0),True)
+			End If
+			If FindDoc Is Nothing Then
+				Messagebox "Организация "+doc.Contragent(0)+" не найдена !",16,DB.Title
+			Else
+				Dim ws As New NotesUIWorkspace
+				Call ws.EditDocument(False,FindDoc)	
+			End If	
+		Else
+			Messagebox {База данных "Контрагенты" не найдена!},16,DB.Title
+		End If
+	Else
+		Messagebox {База данных Контрагенты не найдена!},16,DB.Title
+	End If
+End Sub
+
+Sub ShowCategoryDoc
+	Dim ws As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument
+	Set uidoc=ws.CurrentDocument
+	Set doc=uidoc.Document
+	'	
+	Dim db As NotesDatabase' Адресная книга контрагентов
+	Set db=doc.ParentDatabase
+	Dim UNID As NotesView
+	Set UNID=db.GetView("UNID")
+	'
+	Dim FindDoc As NotesDocument	
+	Set FindDoc=UNID.GetDocumentByKey(doc.CategoryUNID(0),True)
+	If FindDoc Is Nothing Then
+		Messagebox "Категория "+doc.Category(0)+" не найдена !",16,DB.Title
+	Else
+		Call ws.EditDocument(False,FindDoc)	
+	End If	
+End Sub
+
+Sub CreateDocumentInOutlook(ItemType As Variant)
+	Dim w As New NotesUIWorkSpace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument
+	Set uidoc = w.CurrentDocument 
+	Set doc=uidoc.Document
+	'	
+	Dim outlookApp As Variant      '  Outlook
+	Dim ItemTask As Variant	 	    '  Задача
+	Dim Attachs As Variant		    ' Массив вложений
+	Dim Attach As Variant			    ' Вложение
+	'
+	Dim Attendee As Variant
+	Set outlookApp = CreateObject ("Outlook.Application")	
+	Set ItemTask=outlookApp.CreateItem(ItemType) ' olTaskItem
+	ItemTask.Subject=doc.Subject(0)
+	ItemTask.Categories=doc.Category(0)
+	URL=Chr(13)+"Ссылка на документ  ->"+doc.NotesURL+Chr(13)+Chr(13)
+	Dim BodyItem As NotesItem
+	If doc.HasItem("Body") Then
+		Set BodyItem=doc.GetFirstItem("Body")
+		If BodyItem.Text<>"" Then
+			ItemTask.Body=URL+BodyItem.Text+Chr(13)+Chr(13)
+		Else
+			ItemTask.Body=URL
+		End If
+	Else
+		ItemTask.Body=URL
+	End If
+	' Вложенные файлы
+	Set Attachs = ItemTask.Attachments
+	Dim rtitem As Variant
+	TempDir$ = Environ("Temp")+"\"
+	Chdir TempDir$
+	Set rtitem = doc.GetFirstItem( "Body" )
+	If ( rtitem.Type = RICHTEXT ) Then
+		If Not Isempty(rtitem.EmbeddedObjects) Then
+			Forall o In rtitem.EmbeddedObjects
+				If ( o.Type = EMBED_ATTACHMENT ) Then
+					Call o.ExtractFile( TempDir$+o.Name )
+					Set Attach = Attachs.Add(TempDir$+o.Name, , , )
+				End If
+			End Forall
+		End If
+	End If
+	ItemTask.Companies=doc.Contragent(0) 		' Организация
+	'
+	On Error Goto ErrorHandler	
+	Call ItemTask.Display(False)
+ErrorHandler:
+	Exit Sub
+End Sub
+
+Sub SelectDocType
+	Dim w As New NotesUIWorkSpace
+	Dim db As NotesDatabase
+	Dim collection As NotesDocumentCollection
+    '
+	Set a = w.CurrentDatabase
+	Set db=a.Database
+	Set collection = w.PickListCollection(PICKLIST_CUSTOM, False,db.Server,db.FilePath,"DocType","Типы документов" ,"Выберите тип документа")
+	If collection.Count>0 Then
+		Dim Doc As NotesDocument,CurrentDoc As NotesDocument
+		Dim CurrentUIDoc As NotesUIDocument
+		Set CurrentUIDoc=w.CurrentDocument
+		CurrentUIDoc.EditMode=True
+		Set CurrentDoc=CurrentUIDoc.Document
+		Dim cat As String
+		Set Doc = collection.GetFirstDocument()
+		Dim unid As String
+		unid = Doc.UniversalID
+	     '
+		cat=GetPlaceName(Doc)
+		Call CurrentDoc.ReplaceItemValue("DocType",cat)				
+		Call CurrentDoc.ReplaceItemValue("DocTypeUNID",unid)
+		Call CurrentUIDoc.Refresh
+	End If
+End Sub
+'
+'***** Выбор контрагента Банк-клиент **********
+'
+Sub SelectCompany
+ '
+ Dim session As New NotesSession  ' Текущая сессия
+ Dim db As NotesDatabase
+ Set db=session.CurrentDatabase
+ Dim w As New NotesUIWorkSpace
+ Dim collection As NotesDocumentCollection
+ '
+ Dim FileName As String		
+ Call GetRes("bibContragents",FileName)
+ If FileName<>"" Then
+  Dim AK As New NotesDatabase( "", "" )
+  Call AK.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+  If AK.IsOpen Then
+   Set collection = w.PickListCollection(PICKLIST_CUSTOM, False,AK.Server,AK.FilePath,"Select","Справочник контрагентов" ,"Выберите организацию")
+   If collection.Count>0 Then
+    Dim Doc As NotesDocument,CurrentDoc As NotesDocument
+    Set Doc = collection.GetFirstDocument()	
+    Dim CurrentUIDoc As NotesUIDocument
+    Set CurrentUIDoc=w.CurrentDocument
+    CurrentUIDoc.EditMode=True
+    Set CurrentDoc=CurrentUIDoc.Document
+    if UBound(Doc.Company_Acc1)=0 then
+     Call CurrentDoc.ReplaceItemValue("Company_Acc1",Doc.Company_Acc1(0)) ' Номер расчётного счёта
+    else
+      Dim item As NotesItem
+      Set item=Doc.GetFirstItem("Company_Acc1")
+      CurrentUIDoc.EditMode=True
+      CurrentDoc.Canceled="Yes"
+      CurrentDoc.Companyes=""
+      Call CurrentDoc.ReplaceItemValue("UserAlt",item)
+      Call w.DialogBox 	( "GetAccount", True, True, False, True, 	False, False, "Выберите расчётный счёт" )
+      Call CurrentUIDoc.Refresh()
+      Account=CurrentDoc.Companyes(0)
+      Canceled=CurrentDoc.Canceled(0)
+      Call CurrentDoc.RemoveItem("Canceled")
+      Call CurrentDoc.RemoveItem("UserAlt")
+      Call CurrentDoc.RemoveItem("Companyes")
+      If Canceled="No" Then
+       Call CurrentDoc.ReplaceItemValue("Company_Acc1",Account) ' Номер расчётного счёта
+      else
+       Exit Sub
+      End if
+    End if
+    Call CurrentDoc.ReplaceItemValue("Contragent",Doc.SubjectShort(0))
+    Call CurrentDoc.ReplaceItemValue("ContragentUNID",Doc.UniversalID)
+    Call CurrentDoc.ReplaceItemValue("NumberDoc",Doc.NumberDoc(0)) ' Номер договора о дистанционном банковском обслуживании
+    Call CurrentDoc.ReplaceItemValue("DateDoc",Doc.DateDoc(0)) ' Дата договора
+    Call CurrentUIDoc.Refresh()
+   End If
+  End If
+ End If
+End Sub
+
+Sub CreateNewDocumentFromTemplate()
+ Dim session As New NotesSession  ' Текущая сессия
+ Dim w As New NotesUIWorkSpace
+ Dim db As NotesDatabase
+ Dim collection As NotesDocumentCollection
+ Dim doc As NotesDocument
+ '
+ Set db=session.CurrentDatabase
+ Dim view As NotesView
+ Set view=db.GetView("Бланки")
+ Set doc=view.GetFirstDocument()
+ 'Set collection = w.PickListCollection(PICKLIST_CUSTOM, False,db.Server,db.FilePath,"Бланки","Шаблоны документов" ,"Выберите шаблон документа")
+ 'Set doc=collection.GetFirstDocument
+ If Not doc Is Nothing Then
+  Dim NewDoc As NotesDocument
+  Set NewDoc=db.CreateDocument()					' Создание объекта класса NotesDocument
+  FormName=doc.FormName(0)
+  Call NewDoc.ReplaceItemValue("Form",FormName)			        ' форма документа
+  NewDoc.Version=1
+  if DemoVersion() then
+   Exit Sub
+  End if
+  Call NewDoc.ReplaceItemValue("Subject",doc.Subject(0))		' Заголовок документа
+  ' Подписывает
+  if (FormName="SignAccess")Or(FormName="BankClient")Or(FormName="DBO") then
+   Call NewDoc.ReplaceItemValue("SignAlt",doc.SignAlt)		
+   Call NewDoc.ReplaceItemValue("SignLN",doc.SignLN)		
+   Call NewDoc.ReplaceItemValue("SignTabNum",doc.SignTabNum)		
+   Call NewDoc.ReplaceItemValue("SignStruct",doc.SignStruct)		
+   Call NewDoc.ReplaceItemValue("SignDepartment",doc.SignDepartment)		
+   Call NewDoc.ReplaceItemValue("SignPost",doc.SignPost)		
+   Call NewDoc.ReplaceItemValue("SignFileTitle",doc.SignFileTitle)	
+  End if
+  ' Категория
+  Call NewDoc.ReplaceItemValue("Category",doc.Category)							' Категория
+  Call NewDoc.ReplaceItemValue("CategoryUNID",doc.CategoryUNID)			' Категория UNID
+  Dim UNID As NotesView
+  Set UNID=db.GetView("UNID")
+  Dim CategoryDoc As NotesDocument
+  Set CategoryDoc=UNID.GetDocumentByKey(doc.CategoryUNID(0),true)
+  if Not CategoryDoc Is Nothing then
+   Call NewDoc.ReplaceItemValue("Office",CategoryDoc.Reviewers)			' Регистраторы по данный Категории
+  End if
+  ' Ознакомление
+  ' Группы рассылки
+  Call NewDoc.ReplaceItemValue("ReadGroup",doc.ReadGroup)		' Группы рассылки 
+  Call NewDoc.ReplaceItemValue("ReadGroupUNID",doc.ReadGroupUNID)	' Группы рассылки 
+  if (FormName="Comando") then
+   Call FromAuthor(NewDoc)
+   Call GetUserFIO(doc.Originator(0),Alt,Post,Department,Manager)
+   Call NewDoc.ReplaceItemValue("Originator",doc.Originator(0))		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorAlt",Manager)		' 
+   Call NewDoc.ReplaceItemValue("OriginatorTabNum",doc.OriginatorTabNum(0))		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorPost",Post)		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorDepartment",Department)		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorStruct",doc.OriginatorStruct(0))		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorFileTitle",doc.OriginatorFileTitle(0))		' LN 
+   Call NewDoc.ReplaceItemValue("OriginatorTel",doc.OriginatorTel(0))		' Телефон
+  else
+   Call FromOriginator(NewDoc)
+  End if
+  Call BodyVersions(doc,NewDoc,"Body")												' Содержимое шаблона
+  Call ApproveTemplate(doc,NewDoc)
+  Call AccessVersions(doc,NewDoc)				' Доступ
+  Call NewDoc.ReplaceItemValue("Comment",doc.Comment(0))				' Комментарий автора
+  '
+  ' Рецензенты второго этапа
+  Call NewDoc.ReplaceItemValue("PerfsRouter", Doc.PerfsRouter)
+  Call NewDoc.ReplaceItemValue("PerfsRouterAlt", Doc.PerfsRouterAlt)
+  ' Рецензенты третьего этапа
+  Call NewDoc.ReplaceItemValue("Router", Doc.Router)
+  Call NewDoc.ReplaceItemValue("RouterAlt", Doc.RouterAlt)
+  '
+  Call w.ViewRefresh()
+  Set uidoc=w.EditDocument(True,NewDoc)
+  Call w.ViewRefresh
+ End If
+End Sub
+
+Sub QueryCloseEvent(Source As Notesuidocument)
+	If Not DemoVersion() Then
+		Dim doc As NotesDocument
+		Set doc=Source.Document
+		If doc.Access_Modified(0)<>""  And (Not Source.InPreviewPane) Then
+			Dim session As New NotesSession
+			UserName=session.UserName
+			Dim DocumentStatus As  NotesItem
+			Set DocumentStatus = doc.GetFirstItem ("DocumentStatus")
+			Status=DocumentStatus.Text
+		' Поиск пользователя в списке рецензентов
+			Find=False
+			Dim Reviewers As NotesItem,CoReviewers As NotesItem
+			Set Reviewers=doc.GetFirstItem("Reviewers")  ' Диспетчер
+			Set CoReviewers=doc.GetFirstItem("CoReviewers") ' и.о. Диспетчера
+			If Reviewers.Contains(UserName) Then
+				Find=True
+			Elseif CoReviewers.Contains(UserName) Then
+				Find=True
+			Elseif Status="D" And doc.Status(0)="E" Then
+				Find=True
+			End If
+			'If UserName="CN=Dmitry V Nikulin/O=Omz" Then
+			'	Find=False
+			'End If
+			If Find Then
+				If doc.HasItem("DateTimeOpen") Then
+					Dim d As NotesDocument
+					Dim CoReviewedLN As NotesItem
+					Dim DateTimeOpen As  NotesItem
+					Set DateTimeOpen = doc.GetFirstItem ("DateTimeOpen")
+					Dim CurrentDate As New NotesDateTime("")
+					Call CurrentDate.SetNow
+					Dim ReadName As NotesItem,ReadDateTimeOpen As NotesItem,ReadDateTimeClose As NotesItem,ReadTimeDifference As NotesItem,ViewComment As NotesItem
+				'1. Имя пользователя
+					If doc.ReadName(0)="" Then
+						doc.ReadName=""
+					End If
+					Set ReadName=doc.GetFirstItem("ReadName")
+					Call ReadName.AppendToTextList(GetAltCN)
+				'2. Дата и время открытия
+					If doc.ReadDateTimeOpen(0)="" Then
+						doc.ReadDateTimeOpen=""
+					End If
+					Set ReadDateTimeOpen=doc.GetFirstItem("ReadDateTimeOpen")
+					Call ReadDateTimeOpen.AppendToTextList(DateTimeOpen.Text)
+					Dim ReadDateTime As New NotesDateTime(DateTimeOpen.Text)
+				'3. Дата и время закрытия
+					If doc.ReadDateTimeClose(0)="" Then
+						doc.ReadDateTimeClose=""
+					End If
+					Set ReadDateTimeClose=doc.GetFirstItem("ReadDateTimeClose")
+					Call ReadDateTimeClose.AppendToTextList(CurrentDate.DateOnly+" "+CurrentDate.TimeOnly)
+				'4. Суммарное время открытия
+					If doc.ReadTimeDifference(0)="" Then
+						doc.ReadTimeDifference=""
+					End If
+					Set ReadTimeDifference=doc.GetFirstItem("ReadTimeDifference")
+					Call ReadTimeDifference.AppendToTextList(Cstr(CurrentDate.TimeDifference(ReadDateTime)))
+				'5. Комментарий
+					Set ViewComment=doc.GetFirstItem("ViewComment")
+					Title="1"   ' Просмотр
+				'
+					Dim UN As NotesName
+					Dim view As NotesView,CoView As NotesView
+					Set View=doc.ParentDatabase.GetView("DBRefFormLNLookup")
+					Set CoView=doc.ParentDatabase.GetView("DBRefFormCoLNLookup")
+					Dim Comment As NotesDocument
+					Dim dc As NotesDocumentCollection
+					If Status="D" Then
+						If doc.Status(0)="E" Then
+							Title="2"
+						End If
+					Else
+						If Status="E" Then ' Документ на согласовании у рецензента
+							If Reviewers.Contains(UserName) Then
+							' Поиск рецензии
+								Call View.Refresh()
+								Set Comment=View.GetDocumentByKey(doc.UniversalID+"Comment"+UserName,True)
+								If Comment Is Nothing Then
+									Call CoView.Refresh()
+									Set Comment=CoView.GetDocumentByKey(doc.UniversalID+"Comment"+UserName,True)
+								End If
+								If Comment Is Nothing Then
+									Title="3" ' Просмотрена рецензентом, решение не принято
+								Else
+									Set UN = New NotesName(UserName)
+									UNC=UN.Canonical
+									Dim ReviewedLN As NotesItem
+									Set ReviewedLN=doc.GetFirstItem("ReviewedLN")
+									Set CoReviewedLN=doc.GetFirstItem("CoReviewedLN")
+									If (Not ReviewedLN.Contains(UNC)) And (Not CoReviewedLN.Contains(UNC))  Then
+										Title="4" ' Просмотрена рецензентом, решение принято
+									Else
+									' Количество рецензентов
+										CountReviewers=0
+										i=0
+										Forall vv In doc.Reviewers
+											If vv=UNC Or doc.CoReviewers(i)=UNC Then
+												CountReviewers=CountReviewers+1
+											End If
+											i=i+1
+										End Forall
+									' Количество фактических рецензий
+										CountComment=0
+										Set dc=View.GetAllDocumentsByKey(doc.UniversalID+"Comment",False)
+										If dc.Count>0 Then
+											Set d=dc.GetFirstDocument
+											While Not d Is Nothing 
+												If d.ReviewedLN(0)=UNC Or d.CoReviewedLN(0)=UNC Then
+													CountComment=CountComment+1
+												End If
+												Set d=dc.GetNextDocument(d)
+											Wend
+										End If
+									' Количество рецензий, созданных в момент открытия документа
+										i=0
+										CountReviewed=0
+										Forall v In ReviewedLN.Values
+											If v=UNC Or doc.CoReviewedLN(i)=UNC Then
+												CountReviewed=CountReviewed+1
+											End If
+											i=i+1
+										End Forall
+										If CountReviewers>CountComment Then
+											If CountComment<>CountReviewed Then
+												Title="4" ' Просмотрена рецензентом, решение принято
+											Else
+												Title="3" ' Просмотрена рецензентом, решение не принято
+											End If
+										Else
+											If CountReviewers=CountComment Then
+												If CountComment<>CountReviewed Then
+													Title="4" ' Просмотрена рецензентом, решение принято
+												End If
+											End If
+										End If
+									End If
+								End If
+							Else
+								If CoReviewers.Contains(UserName) Then
+								' Поиск рецензии
+									Call CoView.Refresh()
+									Set dc=CoView.GetAllDocumentsByKey(doc.UniversalID+"Comment"+UserName,True)
+									If dc.Count=0 Then
+										Title="3" ' Просмотрена рецензентом, решение не принято
+									Else
+										Set UN = New NotesName(UserName)
+										UNC=UN.Canonical
+										Set CoReviewedLN=doc.GetFirstItem("CoReviewedLN")
+										If Not CoReviewedLN.Contains(UNC) Then
+											Title="4" ' Просмотрена рецензентом, решение не принято
+										End If
+									End If
+								End If
+							End If
+						End If
+					End If
+					Call ViewComment.AppendToTextList(Title)
+				'
+					Call doc.Save(True,True)
+				End If
+			End If
+		End If
+	End If
+End Sub
+
+Sub PostOpenEvent(Source As Notesuidocument)
+	If DemoVersion() Then
+		Call Source.Close()
+	End If
+End Sub
+
+
+Sub ShowDocType
+	Dim ws As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument
+	Set uidoc=ws.CurrentDocument
+	Set doc=uidoc.Document
+	'	
+	Dim db As NotesDatabase
+	Set db=doc.ParentDatabase
+	Dim UNID As NotesView
+	Set UNID=db.GetView("UNID")
+	'
+	Dim FindDoc As NotesDocument	
+	Set FindDoc=UNID.GetDocumentByKey(doc.DocTypeUNID(0),True)
+	If FindDoc Is Nothing Then
+		Messagebox {Тип: "}+doc.DocType(0)+{" не найден !},16,DB.Title
+	Else
+		Call ws.EditDocument(False,FindDoc)	
+	End If	
+End Sub
+
+
+Sub SendView (doc As NotesDocument,SendTo As Variant)
+ Dim s As New NotesSession
+ Dim db As NotesDataBase
+ Set db=doc.ParentDatabase
+ ' Рассылка в Outlook
+ InternetAddress=GetInternetAddress(SendTo)
+ If InternetAddress<>"" Then
+  If doc.RegNum(0)<>"" Then
+   RegNum=", Рег.номер:"+doc.RegNum(0)
+  End If
+  Dim noticeEx As NotesDocument
+  Dim stream As NotesStream
+  Dim mimeE As NotesMIMEEntity
+  Dim bodyE As NotesMIMEEntity
+  Set noticeEx= New NotesDocument (db)
+  noticeEx.Subject={Документ на ознакомление: "} & doc.GetItemValue ("Subject")(0) & {"} & RegNum
+  noticeEx.SendTo=InternetAddress
+   Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+  Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+  Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  Set bodyE = noticeEx.CreateMIMEEntity("Body")
+  Set mimeE = bodyE.CreateChildEntity 				
+  Set stream = s.CreateStream
+  Dim Personal As NotesDatabase
+  Dim FileName As String		
+  Call GetRes("bibPersonal",FileName)
+  If FileName<>"" Then
+   Set Personal = New NotesDatabase( "", "" )
+   Call Personal.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+   If Personal.IsOpen Then
+    Dim EMailLookup As NotesView
+    Set EMailLookup=Personal.GetView("EMail")
+    Dim Pers As NotesDocument
+    Set Pers=EMailLookup.GetDocumentByKey(InternetAddress)
+    if Not Pers Is Nothing then
+     If Pers.Sex(0)="W" Then ' Женский пол
+      Title="Уважаемая "
+     Else ' Мужской пол
+      Title="Уважаемый "
+     End If
+     Call stream.WriteText(Title+Trim(Pers.FirstName(0)+" "+Pers.SecondName(0))+"!<br><br>")
+    End if
+    PersonalDb=Personal.Title
+    PersonalURL=Personal.NotesURL
+    x=Split(PersonalURL,{://})
+    y=Split(x(1),{/})
+    PersonalHTTP=Right(x(1),Len(x(1))-Len(y(0)))
+   End If
+  End If
+  Call stream.WriteText({Пожалуйста, найдите время ознакомиться с документом: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+  stream.WriteText {<TABLE border="1" cols="2">}
+  Call FindOriginator(doc,stream) 	' Ответственный исполнитель
+  If doc.GetItemValue ("Contragent")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Организация (клиент):</b><TD>}+doc.Contragent(0) 
+  End If
+  If doc.GetItemValue ("RegNum")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Рег. номер:</b><TD>}+doc.RegNum(0) 
+  End If
+  Call FindCategory(doc,stream)		' Категория 
+  If doc.GetItemValue ("Title")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Комментарий:</b><TD>}+doc.Title(0) 
+  End If
+		' Комментарий автора
+		If doc.Comment(0)="" Then
+			Dim OriginatorComment As NotesItem
+			Set OriginatorComment=doc.GetFirstItem("OriginatorComment")
+			If Not OriginatorComment Is Nothing Then
+				If OriginatorComment.Text<>"" Then
+					stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & OriginatorComment.Text  & {</FONT>}
+				End If
+				
+   End If        
+  Else
+   stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & doc.Comment(0)& {</FONT>}
+  End If
+  stream.WriteText {</TABLE>}
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})			
+  theURL=db.NotesURL
+  CurDb=db.Title
+  x=Split(theURL,{://})
+  y=Split(x(1),{/})
+  HTTP=Right(x(1),Len(x(1))-Len(y(0)))
+  ' Полезные ссылки
+  stream.WriteText {<TABLE border="1" cols="2">}
+  stream.WriteText {<TR><TD><center><i><b>Полезные ссылки</b></i></center><TD><center><i><b>Web-ссылки</b></i></center>}
+  stream.WriteText {<TR><TD><i>Все документы расположены в базе: "<a href="} + theURL + {">}+CurDb+{</a>"</i><TD><i>Открытие базы через Web: "<a href="}+WebServerName+HTTP + {">}+CurDb+{</a>"</i>}
+  stream.WriteText {<TR><TD><i>Информация о сотрудниках банка расположена в справочнике: "<a href="} + PersonalURL + {">}+PersonalDb+{</a>"</i><TD><i>Открытие справочника через Web: "<a href="}+WebServerName+PersonalHTTP + {">}+PersonalDb+{</a>"</i>}
+  stream.WriteText {</TABLE>}
+  Call AutoSignBIB(stream)
+  Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+  Call noticeEx.Send (False)
+ End If
+End Sub
+
+
+
+
+
+
+
+Sub SendWriteUser (doc As NotesDocument,SendTo As Variant,TabNumLookup As NotesView)
+	If FindUserInAddressBooks(SendTo)=1 Then
+		Dim s As New NotesSession
+		Dim db As NotesDataBase
+		Dim notice As NotesDocument
+	'
+		Dim RTStyle As NotesRichTextStyle,RTStyleBold As NotesRichTextStyle
+		Set RTStyle = s.CreateRichTextStyle
+		Let RTStyle.FontSize = 10
+		Let RTStyle.Bold = False	
+		Set RTStyleBold = s.CreateRichTextStyle
+		Let RTStyleBold.FontSize = 10
+		Let RTStyleBold.Bold = True
+	'
+		Set db=doc.ParentDatabase
+		Set notice = db.CreateDocument
+	'
+		Call notice.ReplaceItemValue ("Form", "Memo")
+	'
+		Call notice.ReplaceItemValue ("From", DBTitle)   
+		Call notice.ReplaceItemValue ("Principal", DBTitle) 
+		Call notice.ReplaceItemValue ("SendTo", SendTo)
+	'
+		Call notice.ReplaceItemValue ("_ViewIcon", 56)
+		Call notice.ReplaceItemValue ("SenderTag", "J")
+		Call notice.ReplaceItemValue ("Logo", "StdNotesLtr33")
+	'
+		Dim body As New NotesRichTextItem (notice, "Body")
+		Call GetUserFull(SendTo,Alt,Post,Department,TabNum)
+		Call HelloWorld(body,TabNumLookup,TabNum)
+	'
+		If doc.RegNum(0)<>"" Then
+			RegNum=", "+"Рег.№"+doc.RegNum(0)
+		End If
+		Call notice.ReplaceItemValue ("Subject", "Документ на ознакомление: "+{"}+doc.Subject(0)+{"}+RegNum)
+	' Срок ознакомления
+		Dim DateWrite As NotesItem
+		Set DateWrite=doc.GetFirstItem("DateWrite")
+		Dim DateTimeWrite As NotesDateTime
+		Set DateTimeWrite=DateWrite.DateTimeValue
+	'
+		Let RTStyle.Bold = False
+		Call body.AppendStyle (RTStyle)
+		Call body.AppendDocLink (doc, "Документ из базы данных " & db.Title )
+		Call body.AppendText ({ <--- Пожалуйста, найдите время ознакомиться с документом: "})
+		Let RTStyle.NotesColor = COLOR_BLUE
+		Let RTStyle.Underline=True
+		Call body.AppendStyle (RTStyle)
+	'
+		Call body.AppendDocLink(doc,doc.Subject(0),doc.Subject(0))
+		Let RTStyle.NotesColor = COLOR_BLACK
+		Let RTStyle.Underline=False
+		Call body.AppendStyle (RTStyle)	
+		
+		
+		Call body.AppendText ({"}+RegNum+", ответственный: ")
+		Originator=doc.OriginatorAlt(0)
+		Call body.AppendStyle (RTStyleBold)
+		Call body.AppendText (RefreshFirstName(Originator))
+		Call body.AppendStyle (RTStyle)
+		Call body.AppendText (RefreshLastName(Originator) & {. Срок ознакомления: })		
+		Call body.AppendStyle (RTStyleBold)	
+		Call body.AppendText (DateTimeWrite.DateOnly )
+		Call body.AppendStyle (RTStyle)
+		Call body.AppendText ("." )
+	' for Calendar
+		Call notice.ReplaceItemValue ("CalendarDateTime", doc.DateWrite(0))
+		Call notice.ReplaceItemValue ("StartDateTime", doc.DateWrite(0))
+	'
+		Call body.AddNewLine( 1 )
+		Call body.AppendText ({Нажмите на кнопку "})
+		Call body.AppendStyle (RTStyleBold)
+		Call body.AppendText ("Ознакомление")
+		Call body.AppendStyle (RTStyle)
+		Call body.AppendText ("\")
+		Call body.AppendStyle (RTStyleBold)
+		Call body.AppendText ("С документом ознакомлен")
+		Call body.AppendStyle (RTStyle)
+		Call body.AppendText ({" !})
+	'
+		Call notice.Send (False)	' Запульнуть письмо
+	End If	
+End Sub
+
+Sub GetFirstSendTo(db As NotesDatabase,doc As NotesDocument,group As NotesDocument,MaxCount As Integer,Sending As Integer,Reestr As NotesDatabase,TabNumLookup As NotesView)
+	Dim item As NotesItem,SendTo As NotesItem,Post As NotesItem,Department As NotesItem
+	Dim CoAlt As String
+	Dim Access_Group As NotesItem
+	Dim PersonPost As String,PersonDepartment As String
+	Set item=group.GetFirstItem("GroupUNID")					
+	Forall v In item.Values
+		Dim Document As NotesDocument
+		Set Document=Reestr.GetDocumentByUNID(v)	
+		If (Document.Form(0)="GroupSend") Then ' Группа рассылки
+			Current=GetLastIndex(doc)
+			Forall r In Document.WriteDeliveryLN
+				If doc.CoWrite(0)="0" Then ' Делегирование
+					'Ass=GetAssistent(r,CoAlt,PersonPost,PersonDepartment)		
+					Ass=GetFullAssistent(r,CoAlt)
+					Find=FindUserLN(doc,Ass,r)
+					If Not Find Then
+						If r=Ass Then
+							Call doc.ReplaceItemValue( "Access_Write"+Current, r)									
+						Else
+							Set Access_Group= New NotesItem  (doc, "Access_Write"+Current, Ass,1076 )							
+						End If
+						Set Access_CoGroup= New NotesItem  (doc, "Access_CoWrite"+Current, r,1076 )
+						If Sending Then
+							If TabNumLookup Is Nothing Then
+								Call SendWrite(doc,Ass)	
+							Else
+								Call SendWriteUser(doc,Ass,TabNumLookup)	
+							End If
+						End If
+						Print Current+"."+r						
+						Call doc.Save(True,True)
+					End If
+				Else
+					Find=FindUserLN(doc,r,r)
+					If Not Find Then
+						Call doc.ReplaceItemValue( "Access_Write"+Current, r)
+						Set Access_CoGroup= New NotesItem  (doc, "Access_CoWrite"+Current, r,1076 )
+						If Sending Then
+							If TabNumLookup Is Nothing Then
+								Call SendWrite(doc,r)	
+							Else
+								Call SendWriteUser(doc,r,TabNumLookup)	
+							End If
+						End If
+					End If
+				End If							
+				If Not Find Then
+					Current=Current+1					
+				End If
+				If Current>MaxCount Then
+					
+					Dim NewDoc As NotesDocument
+					Dim Response As NotesDocument
+					Dim Responses As NotesDocumentCollection
+					Dim ParentDoc As NotesDocument
+					doc.SaveOptions="1"
+					doc.WriteSend="1"
+					If doc.Form(0)="Document" Then
+						Set NewDoc=doc.CopyToDataBase(db)
+						Call NewDoc.MakeResponse(doc)
+					Else
+						Set ParentDoc=db.GetDocumentByUNID(doc.ParentDocumentUNID)
+						Set NewDoc=ParentDoc.CopyToDataBase(db)
+						Call NewDoc.MakeResponse(ParentDoc)
+					End If
+					NewDoc.Form="ResponseVersion"
+					NewDoc.WriteSend="1"
+					If NewDoc.WriteDeliveryAlt(0)<>"" Then
+						NewDoc.WriteDeliveryAlt=""
+						NewDoc.WriteDeliveryLN=""
+						NewDoc.CoWriteDeliveryLN=""
+					End If		
+					i=1			
+					While NewDoc.HasItem("Access_Write"+Cstr(i))
+						SG=Cstr(i)
+						Call NewDoc.RemoveItem("Access_Write"+SG)
+						Call NewDoc.RemoveItem("Access_CoWrite"+SG)
+						i=i+1
+					Wend
+					Call NewDoc.Save(True,True)
+					' Ответные документы
+					Set Responses=doc.Responses
+					Set Response=Responses.GetFirstDocument
+					While Not Response Is Nothing
+						If Response.Form(0)="Comment" Then
+							Set NewResponse=Response.CopyToDataBase(db)				
+							Call NewResponse.MakeResponse(NewDoc)
+							Call NewResponse.Save(True,True)											
+						End If
+						Set Response=Responses.GetNextDocument(Response)
+					Wend
+					Set doc=NewDoc
+					Current=1
+				End If
+			End Forall
+		Else ' Лист рассылки
+			Call GetFirstSendTo(db,doc,Document,MaxCount,Sending,Reestr,TabNumLookup)	
+		End If
+	End Forall
+End Sub
+
+
+Sub ShowDoc(DBName As String,FieldName As String,FieldNameUNID As String)
+	Dim ws As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument
+	Set uidoc=ws.CurrentDocument
+	Set doc=uidoc.Document
+	'
+	Dim FindDoc As NotesDocument
+	Dim AK As NotesDatabase
+	Set AK=OpenDBName(DBName)
+	'
+	Dim Company As NotesItem,CompanyUNID As NotesItem
+	Set Company=doc.GetFirstItem(FieldName)
+	Set CompanyUNID=doc.GetFirstItem(FieldNameUNID)
+	If Ubound(Company.Values)>0 Then
+		uidoc.EditMode=True
+		doc.Canceled="Yes"
+		doc.Companyes=""
+		Call doc.ReplaceItemValue("UserAlt",Company)
+		Call doc.ReplaceItemValue("User",CompanyUNID)
+		Call ws.DialogBox 	( "GetInfo", True, True, False, True, 	False, False, "Выберите группу или список рассылки" )
+		Call uidoc.Refresh
+		Canceled=doc.Canceled(0)
+		Call doc.RemoveItem("Canceled")
+		If Canceled="No" Then
+			Comp=doc.Companyes(0)	
+			i=0
+			Forall v In Company.Values
+				If Comp=v Then
+					Set FindDoc=AK.GetView("UNID").GetDocumentByKey(CompanyUNID.Values(i),True)
+					If Not FindDoc Is Nothing Then
+						Call ws.EditDocument(False,FindDoc)
+					Else
+						Messagebox {Группа рассылки:"}+Comp+{" не найдена!},16,AK.Title
+					End If
+					Exit Forall					
+				End If
+				i=i+1
+			End Forall
+		End If
+	Else
+		Set FindDoc=AK.GetView("UNID").GetDocumentByKey(uidoc.FieldGetText(FieldNameUNID),True)
+		If Not FindDoc Is Nothing Then
+			Call ws.EditDocument(False,FindDoc)
+		Else
+			Messagebox {Группа рассылки:"}+Company.Values(0)+{" не найдена!},16,AK.Title
+		End If
+	End If
+End Sub
+
+
+Sub NotifyOriginatorView(doc As NotesDocument, CommentUIDoc As NotesUIDocument)
+	ReviewerName=CommentUIDoc.FieldGetText("ReviewedAlt")
+	Dim db As NotesDatabase
+	Dim s As New NotesSession
+ 	'
+	Set db=doc.ParentDatabase
+	 ' Рассылка в Outlook
+	If doc.RegNum(0)<>"" Then
+		RegNum=", Рег.номер:"+doc.RegNum(0)
+	End If
+	InternetAddress=GetInternetAddress(doc.Originator(0))
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		noticeEx.Subject={Получено ознакомление на: "}+doc.Subject(0)+{"}+RegNum
+		noticeEx.SendTo=InternetAddress
+  '
+		Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+		Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+		Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  '
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		Call stream.WriteText({Пользователь: <b>}+RefreshFirstName(ReviewerName)+{</b> - ознакомился с документом: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".})
+		If CommentUIDoc.FieldGetText("Comment")<>"" Then
+			stream.WriteText("<br>Комментарий:")
+			stream.WriteText {<br><FONT COLOR="#0000FF">< }+CommentUIDoc.FieldGetText("Comment")+{ ></FONT>}			
+		End If
+		Dim CommentItem As NotesItem
+		Set CommentItem=CommentUIDoc.Document.GetFirstItem("Body")
+		If CommentItem.Text<>"" Then
+			stream.WriteText("<br>Дополнительная информация:")
+			stream.WriteText {<br><FONT COLOR="#0000FF">< }+CommentItem.Text+{ ></FONT>}	
+		End If		
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)
+	End If
+End Sub
+
+Sub NotifyFinalTaskAuthor (doc As NotesDocument,  IsSuccess As Integer, CommentUIDoc As NotesUIDocument)
+ ReviewerName=CommentUIDoc.FieldGetText("ReviewedAlt")
+ Comment=CommentUIDoc.FieldGetText("Comment")
+ Decision=CommentUIDoc.FieldGetText("Decision")
+ Dim db As NotesDatabase
+ Dim s As New NotesSession
+ If doc.RegNum(0)<>"" Then
+  RegNum=", Рег.номер:"+doc.RegNum(0)
+ End If
+ Set db=doc.ParentDatabase
+ i=0
+ InternetAddress=GetInternetAddress(doc.Originator(0))
+StartSend:
+ If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		noticeEx.Subject={Завершено исполнение: "}+doc.Subject(0)+{"}+RegNum
+		noticeEx.SendTo=InternetAddress
+  '
+		Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+		Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+		Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  '
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		If IsSuccess = True Then
+			Call stream.WriteText({Поручение по документу: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>" - исполнено!})
+		Else
+			Call stream.WriteText({Завершено исполнение по документу: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>". Среди исполнителей есть отклонившие поручение!})
+		End If
+		stream.WriteText {<br>Исполнитель: <b>}+RefreshFirstName(ReviewerName)+{</b> - }
+		If Decision="Исполнен" Then
+			Title= " выполнил"
+		Else
+			Title=" отклонил"
+		End If
+		Call stream.WriteText(Title+{ поручение: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Topic")(0)+{</a>".})
+		If doc.AddPerfComment(0)="1" Then
+			If CommentUIDoc.FieldGetText("Comment")<>"" Then
+				stream.WriteText("<br>Комментарий исполнителя:")
+				stream.WriteText {<br><FONT COLOR="#0000FF">< }+CommentUIDoc.FieldGetText("Comment")+{ ></FONT>}			
+			End If
+			Dim CommentItem As NotesItem
+			Set CommentItem=CommentUIDoc.Document.GetFirstItem("Body")
+			If CommentItem.Text<>"" Then
+				stream.WriteText("<br>Дополнительная информация:")
+				stream.WriteText {<br><FONT COLOR="#0000FF">< }+CommentItem.Text+{ ></FONT>}	
+			End If	
+		End If
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+  Call AutoSignBIB(stream)
+  Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+  Call noticeEx.Send (False)
+ End If
+ ' На дополнительный контроль
+ If doc.AddLN(0)<>"" Then
+  If Ubound(doc.AddLN)=>i  Then
+   InternetAddress=GetInternetAddress(doc.AddLN(i))
+   i=i+1
+   Goto StartSend
+  End If		
+ End If
+End Sub
+Sub QueryOpenEvent(Source As Notesuidocument,Isnewdoc As Variant,Continue As Variant)
+	If DemoVersion() Then
+		Let Continue=False
+	Else
+		If IsNewDoc Then Exit Sub
+		Dim session As New NotesSession
+		Dim doc As NotesDocument
+		Set doc=Source.Document
+	' <История просмотра>
+	' Дата и время открытия
+		Dim CurrentDate As New NotesDateTime("")
+		Call CurrentDate.SetNow
+		Dim ReadOpenDateTime As NotesRichTextItem
+		If doc.HasItem ("DateTimeOpen") Then Call doc.RemoveItem ("DateTimeOpen")	
+		Set ReadOpenDateTime = doc.CreateRichTextItem ("DateTimeOpen")
+		Call ReadOpenDateTime.AppendText(CurrentDate.DateOnly+" "+CurrentDate.TimeOnly)
+	' Статус документа
+		Dim DocumentStatus As NotesRichTextItem
+		If doc.HasItem ("DocumentStatus") Then Call doc.RemoveItem ("DocumentStatus")	
+		Set DocumentStatus = doc.CreateRichTextItem ("DocumentStatus")
+		Call DocumentStatus.AppendText(doc.Status(0))
+	'</История просмотра>
+		Dim RTStyle As NotesRichTextStyle,RTStyleBold As NotesRichTextStyle
+	'
+		Set RTStyle =session.CreateRichTextStyle
+		Let RTStyle.NotesColor = COLOR_BLACK
+		Let RTStyle.Bold = False
+		Let RTStyle.FontSize = 8
+		Let RTStyle.NotesFont = FONT_HELV
+	'
+		Set RTStyleBold =session.CreateRichTextStyle
+		Let RTStyleBold.NotesColor = COLOR_BLACK
+		Let RTStyleBold.Bold = True
+		Let RTStyleBold.FontSize = 8
+		Let RTStyleBold.NotesFont = FONT_HELV
+	'	
+		Dim Resp As NotesDocument,ComDoc As NotesDocument
+		Dim RevLog As NotesRichTextItem
+		If doc.HasItem ("ReviewLog_D") Then Call doc.RemoveItem ("ReviewLog_D")	
+		Set RevLog = doc.CreateRichTextItem ("ReviewLog_D")
+		Call RevLog.AppendStyle (RTStyle)
+	' <Версии документа>
+		If Cint(doc.Version(0))>1 Then
+			Dim VersionList As NotesRichTextItem
+			If doc.HasItem ("VersionList") Then Call doc.RemoveItem ("VersionList")	
+			Set VersionList = doc.CreateRichTextItem ("VersionList")
+			Call VersionList.AppendStyle (RTStyle)		
+		End If
+	'</Версии документа>
+	'<Итоговый лист согласования>
+		Dim Count As Integer
+		Count=-1
+		Redim User(0)
+		Dim ItogList As NotesRichTextItem
+		If doc.HasItem ("ItogList") Then Call doc.RemoveItem ("ItogList")	
+		Set ItogList = doc.CreateRichTextItem ("ItogList")
+		Call ItogList.AppendStyle (RTStyle)
+	'</Итоговый лист согласования>
+		'
+		Dim DemandLog As NotesRichTextItem
+		If doc.HasItem ("DemandLog") Then Call doc.RemoveItem ("DemandLog")	
+		Set DemandLog = doc.CreateRichTextItem ("DemandLog")
+		Call DemandLog.AppendStyle (RTStyle)
+		'
+		Dim db As NotesDatabase
+		Set db=doc.ParentDatabase
+		' Документ основание
+		If doc.Form(0)="RelationDoc" Then
+			Dim UNID As NotesView
+			Set UNID=db.GetView("UNID")
+			Dim ParentDoc As NotesDocument
+			Set ParentDoc=UNID.GetDocumentByKey(doc.ParentDocumentUNID,True)
+			If Not ParentDoc Is Nothing Then
+				Dim Parent As NotesRichTextItem	
+				If doc.HasItem ("DoclinkParent") Then Call doc.RemoveItem ("DoclinkParent")	
+				Set Parent = doc.CreateRichTextItem ("DoclinkParent")
+				Call Parent.AppendStyle (RTStyle)	
+				Call Parent.AppendDocLink (ParentDoc , "Ответственный: "+ParentDoc.OriginatorAlt(0))
+				Call Parent.AppendText({ - "})		
+				Let RTStyle.NotesColor = COLOR_BLUE
+				Let RTStyle.Underline=True
+				Call Parent.AppendStyle (RTStyle)
+				Call Parent.AppendDocLink(ParentDoc,ParentDoc.Subject(0),ParentDoc.Subject(0))
+				Let RTStyle.NotesColor = COLOR_BLACK
+				Let RTStyle.Underline=False
+				Call Parent.AppendStyle (RTStyle)
+				Call Parent.AppendText({" (ответственный: }+ParentDoc.OriginatorAlt(0)+", дата создания: "+Cstr(ParentDoc.Created)+")")	
+			End If
+		End If
+		Dim view As NotesView
+		Set view=db.GetView("DBRefFormLookup")
+		
+		Dim vc As NotesViewEntryCollection
+		Dim ve As NotesViewEntry
+		Set vc = view.GetAllEntriesByKey(doc.UniversalID, False)
+	'
+		Dim vcol As NotesViewEntryCollection
+		Dim ventry As NotesViewEntry
+	'
+		If vc.Count>0 Then
+			Set ve=vc.GetFirstEntry
+			Do Until ve Is Nothing
+				Set Resp=ve.Document
+				FormName=Resp.GetItemValue ("Form") (0)
+				If FormName = "DemandComment" Then
+					Call SetCommentRichText(DemandLog,Resp,RTStyle)
+				End If
+				If  FormName= "Comment" Then
+					ReviewedLN=Resp.GetItemValue ("ReviewedAlt") (0)
+					Reviewed=Resp.GetItemValue ("ReviewedLN") (0)
+					Call SetCommentRichText(RevLog,Resp,RTStyle)
+				' Итоговый лист согласования
+					If (doc.Version(0)<>1)And (doc.Form(0)="Document") Then
+						Find=False
+						If Count>-1 Then
+							For C=0 To Count 
+								If User(C)=Reviewed Then
+									Find=True
+									Exit For
+								End If
+							Next
+						End If
+						If Not Find Then
+							Count=Count+1						
+							Redim Preserve User(Count)
+							User(Count)=Reviewed
+							Call SetCommentRichText(ItogList,Resp,RTStyle)
+						End If					
+					End If
+				End If
+				If FormName = "Response" Then ' Версия документа
+					Call VersionList.AppendStyle (RTStyle)
+					Call VersionList.AppendDocLink (Resp , Resp.Subject(0))			
+					Call VersionList.AppendText ( " - "+Resp.Subject(0)+", дата создания: "+Cstr(Resp.DateCreated(0)))
+					Call VersionList.AddNewLine (1)
+					'
+					Call VersionList.AppendStyle (RTStyleBold)			
+					Call VersionList.AppendText ( " Версия: "+Cstr(Resp.Version(0)))
+					Call VersionList.AddNewLine (1)					
+					Call VersionList.AppendStyle (RTStyle)					
+				' Лист согласования
+					Set vcol = view.GetAllEntriesByKey(Resp.UniversalID+"Comment", False)
+					If vcol.Count>0 Then
+						Call VersionList.AppendText("Лист согласования: ")
+						Call VersionList.AddNewLine (1)						
+						Set ventry=vcol.GetFirstEntry
+						Do Until ventry Is Nothing
+							Set ComDoc=ventry.Document
+							ReviewedLN=ComDoc.GetItemValue ("ReviewedAlt") (0)
+							Reviewed=ComDoc.GetItemValue ("ReviewedLN") (0)
+							Call SetCommentRichText(VersionList,ComDoc,RTStyle)
+							Set ventry=vcol.GetNextEntry(ventry)				
+							
+							
+						Loop
+					End If				
+				'
+					Let RTStyle.NotesColor=COLOR_DARK_BLUE
+					Call VersionList.AppendStyle(RTStyle)
+					Call VersionList.AppendText("_____________________________________________________________________________________________________________________")	
+					Let RTStyle.NotesColor=COLOR_BLACK
+					Call VersionList.AppendStyle(RTStyle)
+					Call VersionList.AddNewLine (2)
+				End If
+				Set ve=vc.GetNextEntry(ve)
+			Loop		
+		' Итоговый лист согласования по всем версиям
+			If doc.Version(0)>1 Then
+				Set vc = view.GetAllEntriesByKey(doc.UniversalID+"Response", True)
+				If vc.Count>0 Then
+					Set ve=vc.GetLastEntry
+					Do Until ve Is Nothing
+						Set Resp=ve.Document
+					' Лист согласования
+						Set vcol = view.GetAllEntriesByKey(Resp.UniversalID+"Comment", True)
+						If vcol.Count>0 Then
+							Set ventry=vcol.GetFirstEntry
+							Do Until ventry Is Nothing
+								Set ComDoc=ventry.Document
+								ReviewedLN=ComDoc.GetItemValue ("ReviewedAlt") (0)
+								Reviewed=ComDoc.GetItemValue ("ReviewedLN") (0)
+					    		' Итоговый лист согласования
+								Find=False
+								If Count>-1 Then
+									For C=0 To Count 
+										If User(C)=Reviewed Then
+											Find=True
+											Exit For
+										End If
+									Next
+								End If
+								If Not Find Then
+									Count=Count+1					
+									
+									
+									Redim Preserve User(Count)
+									User(Count)=Reviewed
+									Call SetCommentRichText(ItogList,ComDoc,RTStyle)
+								End If
+								Set ventry=vcol.GetNextEntry(ventry)			
+								
+								
+							Loop
+						End If				
+						Set ve=vc.GetPrevEntry(ve)
+					Loop
+				End If
+			End If
+		'
+	     ' Вопросы ответственному исполнителю
+	     '
+			Dim QuestionLog As NotesRichTextItem
+			If doc.HasItem ("QuestionLog") Then Call doc.RemoveItem ("QuestionLog")	
+			Set QuestionLog = doc.CreateRichTextItem ("QuestionLog")
+			Call LoadResp(QuestionLog,doc,RTStyle,"Question",view)	
+		'
+		' Делегирование полномочий
+		'
+			Dim DelegirLog As NotesRichTextItem
+			If doc.HasItem ("DelegirLog") Then Call doc.RemoveItem ("DelegirLog")	
+			Set DelegirLog = doc.CreateRichTextItem ("DelegirLog")
+			Call LoadResp(DelegirLog,doc,RTStyle,"CoComment",view)	
+		'
+		' Удаление рецензентов
+		'
+			Dim RemRevLog As NotesRichTextItem
+			If doc.HasItem ("RemRevLog") Then Call doc.RemoveItem ("RemRevLog")	
+			Set RemRevLog = doc.CreateRichTextItem ("RemRevLog")
+			Set vc = view.GetAllEntriesByKey(doc.UniversalID+"RemRevLog", True)
+			If vc.Count>0 Then
+				For i=1 To vc.Count
+					Set entry = vc.GetNthEntry(i)
+					Set Resp = entry.Document
+					Killer=Resp.ReviewedAlt(0)
+					Call RemRevLog.AppendStyle (RTStyle)
+					Call RemRevLog.AppendDocLink (Resp , Resp.Subject(0))	
+					Call RemRevLog.AppendStyle (RTStyleBold)
+					Call RemRevLog.AppendText (" "+RefreshFirstName(Killer))
+					Call RemRevLog.AppendStyle (RTStyle)
+					Call RemRevLog.AppendText (RefreshLastName(Killer)+", дата удаления: "+Str(Resp.ReviewedDate(0)))
+					Call RemRevLog.AddNewLine (1)
+					If Ubound(Resp.CoReviewedAlt)=0 Then
+						Call RemRevLog.AppendText("Удалённый рецензент: ")
+						Review=Resp.CoReviewedAlt(0)
+						Call RemRevLog.AppendStyle (RTStyleBold)
+						Call RemRevLog.AppendText (RefreshFirstName(Review))
+						Call RemRevLog.AppendStyle (RTStyle)
+						Call RemRevLog.AppendText (RefreshLastName(Review))
+						Call RemRevLog.AddNewLine (1)		
+					Else
+						Call RemRevLog.AppendText("Удалённые рецензенты:")
+						Call RemRevLog.AddNewLine (1)
+						Num=1
+						Forall vv In Resp.CoReviewedAlt
+							Call RemRevLog.AppendText (Str(Num)+". ")
+							Call RemRevLog.AppendStyle (RTStyleBold)
+							Call RemRevLog.AppendText (RefreshFirstName(vv))
+							Call RemRevLog.AppendStyle (RTStyle)
+							Call RemRevLog.AppendText (RefreshLastName(vv))
+							Call RemRevLog.AddNewLine (1)		
+							Num=Num+1
+						End Forall
+					End If
+					If Resp.Comment(0)<>"" Then
+						Call RemRevLog.AppendText (Resp.Comment(0))
+						Call RemRevLog.AddNewLine (1)						
+					End If
+					Call SetBodyComment(RemRevLog,Resp)  'Вложенные в документ файлы
+				Next				
+			End If	
+		'
+	     ' Добавление рецензентов
+	     '
+			Dim AddRevLog As NotesRichTextItem
+			If doc.HasItem ("AddRevLog") Then Call doc.RemoveItem ("AddRevLog")	
+			Set AddRevLog = doc.CreateRichTextItem ("AddRevLog")
+			Set vc = view.GetAllEntriesByKey(doc.UniversalID+"AddRevLog", True)
+			If vc.Count>0 Then
+				For i=1 To vc.Count
+					Set entry = vc.GetNthEntry(i)
+					Set Resp = entry.Document
+					Killer=Resp.ReviewedAlt(0)
+					Call AddRevLog.AppendStyle (RTStyle)
+					Call AddRevLog.AppendDocLink (Resp , Resp.Subject(0))	
+					Call AddRevLog.AppendStyle (RTStyleBold)
+					Call AddRevLog.AppendText (" "+RefreshFirstName(Killer))
+					Call AddRevLog.AppendStyle (RTStyle)
+					Call AddRevLog.AppendText (RefreshLastName(Killer)+", дата добавления: "+Str(Resp.ReviewedDate(0)))
+					Call AddRevLog.AddNewLine (1)
+					If Ubound(Resp.CoReviewedAlt)=0 Then
+						Call AddRevLog.AppendText("Добавленный рецензент: ")
+						Review=Resp.CoReviewedAlt(0)
+						Call AddRevLog.AppendStyle (RTStyleBold)
+						Call AddRevLog.AppendText (RefreshFirstName(Review))
+						Call AddRevLog.AppendStyle (RTStyle)
+						Call AddRevLog.AppendText (RefreshLastName(Review))
+						Call AddRevLog.AddNewLine (1)		
+					Else
+						Call AddRevLog.AppendText("Добавленные рецензенты:")
+						Call AddRevLog.AddNewLine (1)
+						Num=1
+						Forall vv In Resp.CoReviewedAlt
+							Call AddRevLog.AppendText (Str(Num)+". ")
+							Call AddRevLog.AppendStyle (RTStyleBold)
+							Call AddRevLog.AppendText (RefreshFirstName(vv))
+							Call AddRevLog.AppendStyle (RTStyle)
+							Call AddRevLog.AppendText (RefreshLastName(vv))
+							Call AddRevLog.AddNewLine (1)		
+							Num=Num+1
+						End Forall
+					End If
+					If Resp.Comment(0)<>"" Then
+						Call AddRevLog.AppendText (Resp.Comment(0))
+						Call AddRevLog.AddNewLine (1)						
+					End If
+					Call SetBodyComment(AddRevLog,Resp)  'Вложенные в документ файлы
+				Next				
+			End If	
+			
+		'
+	     ' Связанные документы
+	     '
+			Dim RelationDocList As NotesRichTextItem
+			If doc.HasItem ("RelationDocList") Then Call doc.RemoveItem ("RelationDocList")	
+			Set RelationDocList = doc.CreateRichTextItem ("RelationDocList")
+			Set vc = view.GetAllEntriesByKey(doc.UniversalID+"RelationDoc", True)
+			If vc.Count>0 Then
+				For i=1 To vc.Count
+					Set entry = vc.GetNthEntry(i)
+					Set Resp = entry.Document
+					Call RelationDocList.AppendStyle (RTStyle)
+					Call RelationDocList.AppendDocLink (Resp , Resp.Subject(0))	
+					Call RelationDocList.AppendStyle (RTStyleBold)
+					Call RelationDocList.AppendText (" "+Resp.Subject(0))
+					Call RelationDocList.AddNewLine (1)						
+				Next				
+			End If	
+			
+		End If
+		Call LoadTask(doc,RTStyle,RTStyleBold)	 ' Отображение поручений по документу
+	End If
+End Sub
+
+
+Sub SendDemand (doc As NotesDocument,SendTo As Variant)
+	Dim s As New NotesSession
+	Dim db As NotesDataBase
+ 	'
+	Set db=doc.ParentDatabase
+	If doc.RegNum(0)<>"" Then
+		RegNum=", Рег.номер:"+doc.RegNum(0)
+	End If
+	' Срок исполнения
+	Dim DateWrite As NotesItem
+	Set DateWrite=doc.GetFirstItem("DateDemand")
+	Dim DateTimeWrite As NotesDateTime
+	Set DateTimeWrite=DateWrite.DateTimeValue
+	InternetAddress=GetInternetAddress(SendTo)
+	If InternetAddress<>"" Then
+		Dim noticeEx As NotesDocument
+		Dim stream As NotesStream
+		Dim mimeE As NotesMIMEEntity
+		Dim bodyE As NotesMIMEEntity
+		Set noticeEx= New NotesDocument (db)
+		noticeEx.Subject="Документ на исполнение: "+{"}+doc.Subject(0)+{"}+RegNum
+		noticeEx.SendTo=InternetAddress
+  '
+		Call noticeEx.ReplaceItemValue ("CalendarDateTime", doc.DateDemand(0))
+		Call noticeEx.ReplaceItemValue ("StartDateTime", doc.DateDemand(0))
+		Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+		Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+		Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  '
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		Call stream.WriteText({Пожалуйста, найдите время исполнить документ: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call FindOriginator(doc,stream) 	' Ответственный исполнитель
+		stream.WriteText {<TR><TD><b>Срок исполнения:</b><TD>}+DateTimeWrite.DateOnly 
+		If doc.GetItemValue ("DocType")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Тип документа:</b><TD>}+doc.DocType(0) 
+		End If
+		If doc.GetItemValue ("Target")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Цель:</b><TD>}+doc.Target(0) 
+		End If
+		If doc.GetItemValue ("RegNum")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Регистрационный номер:</b><TD>}+doc.RegNum(0) 
+		End If
+		If doc.Topic(0)<>"" Then
+			stream.WriteText {<TR><TD><b>Предмет поручения:</b><TD>}+doc.Topic(0) 
+		End If
+		Call FindCategory(doc,stream)		' Категория 
+		If doc.GetItemValue ("Title")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Комментарий:</b><TD>}+doc.Title(0) 
+		End If
+		' Комментарий автора
+		If doc.Comment(0)="" Then
+			Dim OriginatorComment As NotesItem
+			Set OriginatorComment=doc.GetFirstItem("OriginatorComment")
+			If Not OriginatorComment Is Nothing Then
+				If OriginatorComment.Text<>"" Then
+					stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & OriginatorComment.Text  & {</FONT>}
+				End If
+				
+			End If        
+		Else
+			stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & doc.Comment(0)& {</FONT>}
+		End If
+		stream.WriteText {</TABLE>}	
+		Call stream.WriteText({Для исполнения нажмите на кнопку: "<b>Исполнен</b>" или "<b>Отклонен</b>" !})
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})	
+		Call AutoSignBIB(stream)
+		Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+		Call noticeEx.Send (False)
+	End If
+End Sub
+
+Sub SendToDemandList(Closed As Boolean,uidoc As NotesUIDocument)
+	Dim doc As NotesDocument
+	Set doc=uidoc.Document
+	'
+	'If (doc.DateDemand(0)="")  Then
+	'	Messagebox "Укажите контрольную дату для исполнения !",16,DBTitle
+	'	Call uidoc.GotoField("DateDemand")
+	'Else
+	If Not InputFieldText(uidoc,"Topic","Предмет поручения:","Введите предмет поручения") Then		
+		' Дата исполнения
+		Set DT = New NotesdateTime ("")
+		Call DT.SetNow          
+		Dim itemDate As NotesItem
+		Set itemDate=doc.GetFirstItem("DateDemand")
+		If (doc.DateDemand(0)="")  Then
+			Set itemDate.DateTimeValue=DT
+		End If
+		'
+		Dim StartDate As NotesDateTime
+		Set StartDate=itemDate.DateTimeValue
+		If DT.DateOnly<>StartDate.DateOnly Then
+			If DT.TimeDifference( StartDate ) > 0  Then
+				Set itemDate.DateTimeValue=DT				
+			End If
+		End If
+		' Исполнители
+		If doc.PerfsAlt(0)="" Then
+			Call SelectDlg("SelectPerfs","Выберите исполнителей")
+			If doc.PerfsAlt(0)="" Then
+				Exit Sub				
+			End If
+		End If			
+		
+		If doc.CoDemand(0)="0" Then ' Делегирование (исполнять нелично)					
+			i=0
+			Forall vl In doc.Perfs
+				Redim Preserve People(i)
+				Redim Preserve PeopleAlt(i)
+				Redim Preserve CoPeople(i)
+				Cov=GetFullAssistent(vl,CoAlt)
+				If Cov<>vl Then ' Есть реальный ассистент
+					Call GetUser(vl,Alt,UserPost,UserDepartment)
+					People(i)=Cov
+					CoPeople(i)=vl
+					PeopleAlt(i)=Alt+CoAlt
+				Else ' Всё приходится делать самому !
+					People(i)=vl
+					CoPeople(i)=vl
+					PeopleAlt(i)=CoAlt
+				End If
+				i=i+1
+			End Forall
+			Call doc.ReplaceItemValue("Perfs",People)
+			Call doc.ReplaceItemValue("CoPerfs",CoPeople)
+			Call doc.ReplaceItemValue("PerfsAlt",PeopleAlt)	
+				'
+		Else ' Согласовывать лично
+			Call doc.ReplaceItemValue("CoPerfs",doc.Perfs)										
+		End If				
+		
+		
+		
+		
+				'
+				'************** Тип исполнения
+				'
+		If Trim(doc.GetItemValue ("PerfType")(0)) = "" Then
+			Messagebox {Укажите тип исполнения !} , 16 , DBTitle
+			Call uidoc.GoToField ("PerfType")		
+			Exit Sub
+		End If	
+				'
+				'**************** Извещать ответственного 
+				'
+		If Trim(doc.GetItemValue ("NotifyOriginatorAfter")(0)) = "" Then
+			Messagebox {Настройте параметры извещений ответственного !} , 16 , DBTitle
+			Call uidoc.GoToField ("NotifyOriginatorAfter")		
+			Exit Sub
+		End If
+		doc.SaveOptions="1"
+		doc.DemandSend="1"
+		' Рассылочка
+		Dim db As NotesDatabase
+		Set db=doc.ParentDatabase
+		Dim TabNumLookup As NotesView
+		' Для автоподписи и обращения к сотруднику в письме
+		'Dim PersonalView As NotesView
+		'Set PersonalView=db.GetView("Personal")
+		'Dim PersonalDoc As NotesDocument
+		'Set PersonalDoc=PersonalView.GetFirstDocument
+		'If Not PersonalDoc Is Nothing Then
+		'	ServerName=db.Server
+		'	vv=PersonalDoc.Files(0)
+		'	Dim  Personal As New NotesDatabase( "", "" )
+		'	Call Personal.OpenByReplicaID(ServerName,Left(vv,8)+Right(vv,8))		
+		'	If Personal.IsOpen Then
+		'		Set TabNumLookup=Personal.GetView("People")
+		'	End If		
+		'End If
+		If TabNumLookup Is Nothing Then
+							'
+			If doc.GetItemValue ("PerfType")(0) = "1" Then ' Последовательное исполнение
+				Call SendDemand(doc,doc.Perfs(0))
+			Else  ' Одновременное исполнение
+				Call SendDemand(doc,doc.Perfs)
+			End If    				
+				'
+		Else
+			If doc.GetItemValue ("PerfType")(0) = "1" Then ' Последовательное исполнение
+				'Call SendDemandUser(doc,doc.Perfs(0),TabNumLookup)
+			Else  ' Одновременное исполнение
+				''Call SendDemand(doc,doc.Perfs)
+				Forall v In doc.Perfs
+				'	Call SendDemandUser(doc,v,TabNumLookup)
+				End Forall
+			End If  				
+				'
+		End If
+		Call doc.RemoveItem("Creators")
+		Call doc.Save(True,True)
+		If Closed Then
+			doc.SaveOptions="0"
+			Call uidoc.Close								
+		End If
+	End If
+	
+	
+				'
+	'End If
+End Sub
+
+Sub SendWrite (doc As NotesDocument,SendTo As Variant)
+ Dim s As New NotesSession
+ Dim db As NotesDataBase
+ Set db=doc.ParentDatabase
+ '
+ If doc.RegNum(0)<>"" Then
+  RegNum=", Рег.номер:"+doc.RegNum(0)
+ End If
+ ' Срок ознакомления
+ Dim DateWrite As NotesItem
+ Set DateWrite=doc.GetFirstItem("DateWrite")
+ Dim DateTimeWrite As NotesDateTime
+ Set DateTimeWrite=DateWrite.DateTimeValue
+ ' Рассылка в Outlook
+ InternetAddress=GetInternetAddress(SendTo)
+ If InternetAddress<>"" Then
+  Subj=doc.Subject(0)
+  Dim noticeEx As NotesDocument
+  Dim stream As NotesStream
+  Dim mimeE As NotesMIMEEntity
+  Dim bodyE As NotesMIMEEntity
+  Set noticeEx= New NotesDocument (db)
+  noticeEx.Subject="Документ на ознакомление: "+{"}+Subj+{"}+RegNum
+  noticeEx.SendTo=InternetAddress
+  '
+  Call noticeEx.ReplaceItemValue ("CalendarDateTime", doc.DateWrite(0))
+  Call noticeEx.ReplaceItemValue ("StartDateTime", doc.DateWrite(0))
+  Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+  Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+  Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  '
+  Set bodyE = noticeEx.CreateMIMEEntity("Body")
+  Set mimeE = bodyE.CreateChildEntity 				
+  Set stream = s.CreateStream
+  'Call HelloWorldBIB(stream,InternetAddress)
+ Dim Personal As NotesDatabase
+ Dim FileName As String		
+ Call GetRes("bibPersonal",FileName)
+ If FileName<>"" Then
+  Set Personal = New NotesDatabase( "", "" )
+  Call Personal.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+  If Personal.IsOpen Then
+   Dim EMailLookup As NotesView
+   Set EMailLookup=Personal.GetView("EMail")
+   Dim Pers As NotesDocument
+   Set Pers=EMailLookup.GetDocumentByKey(InternetAddress)
+   if Not Pers Is Nothing then
+    If Pers.Sex(0)="W" Then ' Женский пол
+     Title="Уважаемая "
+    Else ' Мужской пол
+     Title="Уважаемый "
+    End If
+    Call stream.WriteText(Title+Trim(Pers.FirstName(0)+" "+Pers.SecondName(0))+"!<br><br>")
+   End if
+    PersonalDb=Personal.Title
+    PersonalURL=Personal.NotesURL
+    x=Split(PersonalURL,{://})
+    y=Split(x(1),{/})
+    PersonalHTTP=Right(x(1),Len(x(1))-Len(y(0)))
+  End If
+ End If
+
+  Call stream.WriteText({Пожалуйста, найдите время ознакомиться с документом: "<a href="} + doc.NotesURL + {">}+Subj+{</a>".<br><br>})
+  stream.WriteText {<TABLE border="1" cols="2">}
+  Call FindOriginator(doc,stream) 	' Ответственный исполнитель
+  stream.WriteText {<TR><TD><b>Срок ознакомления:</b><TD>}+DateTimeWrite.DateOnly 
+  If doc.GetItemValue ("Contragent")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Организация (клиент):</b><TD>}+doc.Contragent(0) 
+  End If
+  If doc.GetItemValue ("NumberDoc")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Номер договора:</b><TD>}+doc.NumberDoc(0) 
+  End If
+  If doc.GetItemValue ("DateDoc")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Дата договора:</b><TD>}+doc.DateDoc(0) 
+  End If
+  If doc.GetItemValue ("Company_Acc1")(0) <> "" Then
+   stream.WriteText {<TR><TD><b>Номер счёта:</b><TD>}+doc.Company_Acc1(0) 
+  End If
+		If doc.GetItemValue ("Target")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Цель:</b><TD>}+doc.Target(0) 
+		End If
+		If doc.GetItemValue ("RegNum")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Регистрационный номер:</b><TD>}+doc.RegNum(0) 
+		End If
+		Call FindCategory(doc,stream)		' Категория 
+		If doc.GetItemValue ("Title")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Комментарий:</b><TD>}+doc.Title(0) 
+		End If
+		' Комментарий автора
+		If doc.Comment(0)="" Then
+			Dim OriginatorComment As NotesItem
+			Set OriginatorComment=doc.GetFirstItem("OriginatorComment")
+			If Not OriginatorComment Is Nothing Then
+				If OriginatorComment.Text<>"" Then
+					stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & OriginatorComment.Text  & {</FONT>}
+				End If
+				
+			End If        
+		Else
+			stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & doc.Comment(0)& {</FONT>}
+		End If
+  stream.WriteText {</TABLE>}	
+  Call stream.WriteText({<br>Для ознакомления нажмите на кнопку: "<b>С документом ознакомлен</b>" !})
+  Call stream.WriteText({<br>Для открытия этого документа через Web нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+Subj+{</a>".<br><br>})	
+  theURL=db.NotesURL
+  CurDb=db.Title
+  x=Split(theURL,{://})
+  y=Split(x(1),{/})
+  HTTP=Right(x(1),Len(x(1))-Len(y(0)))
+  ' Полезные ссылки
+  stream.WriteText {<TABLE border="1" cols="2">}
+  stream.WriteText {<TR><TD><center><i><b>Полезные ссылки</b></i></center><TD><center><i><b>Web-ссылки</b></i></center>}
+  stream.WriteText {<TR><TD><i>Все документы расположены в базе: "<a href="} + theURL + {">}+CurDb+{</a>"</i><TD><i>Открытие базы через Web: "<a href="}+WebServerName+HTTP + {">}+CurDb+{</a>"</i>}
+  stream.WriteText {<TR><TD><i>Информация о сотрудниках банка расположена в справочнике: "<a href="} + PersonalURL + {">}+PersonalDb+{</a>"</i><TD><i>Открытие справочника через Web: "<a href="}+WebServerName+PersonalHTTP + {">}+PersonalDb+{</a>"</i>}
+  stream.WriteText {</TABLE>}
+  Call AutoSignBIB(stream)
+  Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+  Call noticeEx.Send (False)
+ End If
+End Sub
+
+
+
+
+
+
+Sub SendRegistrators(doc As NotesDocument,SendTo As Variant)
+ Dim db As NotesDatabase
+ Dim s As New NotesSession
+ '
+ Set db=doc.ParentDatabase
+ ' Рассылка в Outlook
+ InternetAddress=GetInternetAddress(SendTo)
+ If InternetAddress<>"" Then
+  Dim noticeEx As NotesDocument
+  Dim stream As NotesStream
+  Dim mimeE As NotesMIMEEntity
+  Dim bodyE As NotesMIMEEntity
+  Set noticeEx= New NotesDocument (db)
+  noticeEx.Subject="Новый документ на регистрации" & {: "} & doc.GetItemValue ("Subject")(0) & {"}
+  noticeEx.SendTo=InternetAddress
+  '
+		Call noticeEx.ReplaceItemValue ("CalendarDateTime", doc.DateWrite(0))
+		Call noticeEx.ReplaceItemValue ("StartDateTime", doc.DateWrite(0))
+		Call noticeEx.ReplaceItemValue ("_ViewIcon", 56)
+		Call noticeEx.ReplaceItemValue ("SenderTag", "J")
+		Call noticeEx.ReplaceItemValue ("Logo", "StdNotesLtr33")
+  		'
+		Set bodyE = noticeEx.CreateMIMEEntity("Body")
+		Set mimeE = bodyE.CreateChildEntity 				
+		Set stream = s.CreateStream
+		Call HelloWorldBIB(stream,InternetAddress)
+		Call stream.WriteText({Пожалуйста, зарегистрируйте этот документ: "<a href="} + doc.NotesURL + {">}+doc.GetItemValue("Subject")(0)+{</a>".<br><br>})
+		stream.WriteText {<TABLE border="1" cols="2">}
+		Call FindOriginator(doc,stream) 	' Ответственный исполнитель
+		If doc.GetItemValue ("DocType")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Тип документа:</b><TD>}+doc.DocType(0) 
+		End If
+		If doc.GetItemValue ("Target")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Цель:</b><TD>}+doc.Target(0) 
+		End If
+		Call FindCategory(doc,stream)		' Категория 
+		If doc.GetItemValue ("Title")(0) <> "" Then
+			stream.WriteText {<TR><TD><b>Комментарий:</b><TD>}+doc.Title(0) 
+		End If
+		' Комментарий автора
+		If doc.Comment(0)="" Then
+			Dim OriginatorComment As NotesItem
+			Set OriginatorComment=doc.GetFirstItem("OriginatorComment")
+			If Not OriginatorComment Is Nothing Then
+				If OriginatorComment.Text<>"" Then
+					stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & OriginatorComment.Text  & {</FONT>}
+				End If
+				
+			End If        
+		Else
+			stream.WriteText {<TR><TD><b>Комментарий автора:</b><TD><FONT COLOR="#008B00">} & doc.Comment(0)& {</FONT>}
+		End If
+		stream.WriteText {</TABLE>}	
+  Call stream.WriteText({Для регистрации нажмите на кнопку: "<b>Зарегистрировать</b>" !})
+  Call stream.WriteText({<br><br><i>Для открытия этого документа через <b>Web</b> нажмите на следующую ссылку: "<a href="} + OpenDocumentURLInWeb(doc)+{">}+doc.GetItemValue("Subject")(0)+{</a>".</i><br><br>})			
+  Call AutoSignBIB(stream)
+  Call mimeE.SetContentFromText(stream, {text/html;charset="UTF-8"}, ENC_NONE)
+  Call FromAddress(s,noticeEx) ' Обратный адрес - из AD
+  Call noticeEx.Send (False)
+ End If
+End Sub
+
+Sub SetUs(FormName As String,FieldName As String)
+	Dim ws As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Set uidoc=ws.CurrentDocument
+	uidoc.EditMode=True
+	Dim doc As NotesDocument
+	Set doc=uidoc.Document
+	doc.AddWriteList="1"
+	doc.AddReviewersList=""
+	doc.AddDemandList=""
+	doc.AddViewList=""
+	Call SelectDlg(FormName,"Выберите сотрудника")
+	Call uidoc.Refresh
+	Dim Alt As String
+	Dim item As NotesItem
+	Set item=doc.GetFirstItem(FieldName)
+	If doc.AddDemandList(0)="1" Then
+		j=0
+		If doc.Perfs(0)<>"" Then
+			Forall v In doc.Perfs
+				Redim Preserve People(j) As String
+				Redim Preserve PeopleAlt(j) As String
+				People(j)=v
+				PeopleAlt(j)=doc.PerfsAlt(j)
+				j=j+1
+			End Forall				
+		End If
+		Forall r In item.Values
+			If r<>"" Then
+				LN=GetUser(r,Alt,Post,Department)
+				If LN<>"" Then
+					Search=False
+					If doc.Perfs(0)<>"" Then
+						Forall v In doc.Perfs
+							If v=LN	Then
+								Search=True
+								Exit Forall
+							End If
+						End Forall						
+					End If
+					If Not Search Then
+						Redim Preserve People(j) As String
+						Redim Preserve PeopleAlt(j) As String
+						People(j)=LN
+					     ' Альтернативное имя
+						PeopleAlt(j)=Alt
+						j=j+1
+					End If
+				End If				
+			End If
+		End Forall
+			'
+		Call doc.ReplaceItemValue("Perfs",People)
+		Call doc.ReplaceItemValue("PerfsAlt",PeopleAlt)
+		Call UIDoc.Refresh		
+	End If
+	Call doc.RemoveItem("AddDemandList")
+	If doc.AddWriteList(0)="1" Then
+		j=0
+		If doc.WriteDeliveryLN(0)<>"" Then
+			Forall v In doc.WriteDeliveryLN
+				Redim Preserve People(j) As String
+				Redim Preserve PeopleAlt(j) As String
+				People(j)=v
+				PeopleAlt(j)=doc.WriteDeliveryAlt(j)
+				j=j+1
+			End Forall				
+		End If
+		Forall r In item.Values
+			If r<>"" Then
+				LN=GetUser(r,Alt,Post,Department)
+				If LN<>"" Then
+					Search=False
+					If doc.WriteDeliveryLN(0)<>"" Then
+						Forall v In doc.WriteDeliveryLN
+							If v=LN	Then
+								Search=True
+								Exit Forall
+							End If
+						End Forall						
+					End If
+					If Not Search Then
+						Redim Preserve People(j) As String
+						Redim Preserve PeopleAlt(j) As String
+						People(j)=LN
+					     ' Альтернативное имя
+						PeopleAlt(j)=Alt
+						j=j+1
+					End If
+				End If				
+			End If
+		End Forall
+			'
+		Call doc.ReplaceItemValue("WriteDeliveryLN",People)
+		Call doc.ReplaceItemValue("WriteDeliveryAlt",PeopleAlt)
+		Call UIDoc.Refresh		
+	End If
+	Call doc.RemoveItem("AddWriteList")
+	' Лист ознакомления
+	If doc.AddViewList(0)="1" Then
+		j=0
+		If doc.ViewLN(0)<>"" Then
+			Forall v In doc.ViewLN
+				Redim Preserve People(j) As String
+				Redim Preserve PeopleAlt(j) As String
+				People(j)=v
+				PeopleAlt(j)=doc.ViewAlt(j)
+				j=j+1
+			End Forall				
+		End If
+		Forall r In item.Values
+			If r<>"-" Then
+				LN=GetUser(r,Alt,Post,Department)
+				If LN<>"" Then
+					Search=False
+					If doc.ViewLN(0)<>"" Then
+						Forall v In doc.ViewLN
+							If v=LN	Then
+								Search=True
+								Exit Forall
+							End If
+						End Forall						
+					End If
+					If Not Search Then
+						Redim Preserve People(j) As String
+						Redim Preserve PeopleAlt(j) As String
+						People(j)=LN
+					     ' Альтернативное имя
+						PeopleAlt(j)=Alt
+						j=j+1
+					End If
+				End If				
+			End If
+		End Forall
+		'
+		Call doc.ReplaceItemValue("ViewLN",People)
+		Call doc.ReplaceItemValue("ViewAlt",PeopleAlt)
+		Call UIDoc.Refresh		
+	End If	
+	Call doc.RemoveItem("AddViewList")
+	If doc.AddReviewersList(0)="1" Then		
+		j=0
+		If doc.Reviewers(0)<>"" Then
+			Forall v In doc.Reviewers
+				Redim Preserve People(j) As String
+				Redim Preserve PeoplePost(j) As String
+				Redim Preserve PeopleDepartment(j) As String
+				Redim Preserve PeopleAlt(j) As String
+				People(j)=v
+				PeopleAlt(j)=doc.ReviewersAlt(j)
+				PeoplePost(j)=doc.ReviewersPost(j)
+				PeopleDepartment(j)=doc.ReviewersDepartment(j)
+				j=j+1
+			End Forall				
+		End If
+		Forall r In item.Values
+			If r<>"" Then
+				LN=GetUser(r,Alt,Post,Department)
+				If LN<>"" Then
+					Search=False
+					If doc.Reviewers(0)<>"" Then
+						Forall v In doc.Reviewers
+							If v=LN	Then
+								Search=True
+								Exit Forall
+							End If
+						End Forall						
+					End If
+					If Not Search Then
+						Redim Preserve People(j) As String
+						Redim Preserve PeoplePost(j) As String
+						Redim Preserve PeopleDepartment(j) As String
+						Redim Preserve PeopleAlt(j) As String
+						People(j)=LN
+						PeoplePost(j)=Post ' Должность рецензента
+						PeopleDepartment(j)=Department ' Подразделение рецензента
+						' Альтернативное имя
+						PeopleAlt(j)=Alt
+						j=j+1
+					End If
+				End If				
+			End If
+		End Forall
+			'
+		Call doc.ReplaceItemValue("Reviewers",People)
+		Call doc.ReplaceItemValue("ReviewersPost",PeoplePost)
+		Call doc.ReplaceItemValue("ReviewersDepartment",PeopleDepartment)
+		Call doc.ReplaceItemValue("ReviewersAlt",PeopleAlt)
+		Call UIDoc.Refresh
+		
+		
+	End If
+	Call doc.RemoveItem("AddReviewersList")
+End Sub
+
+
+
+
+
+Sub SendToViewerList(Closed As Boolean)
+	Dim MaxCount As Integer
+	MaxCount=2000
+	Dim ParentDoc As NotesDocument
+	'
+	Dim w As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument,group As NotesDocument,d As NotesDocument
+	Dim item As NotesItem,SendTo As NotesItem,Post As NotesItem,Department As NotesItem
+	Dim Search As Integer
+	Dim P As String,Dep As String
+	Dim FileName As String
+	Dim CoAlt As String
+	'
+	Set uidoc=w.CurrentDocument
+	Set doc=uidoc.Document
+	Dim CurDb As NotesDatabase
+	Set CurDb=doc.ParentDatabase
+	If (doc.DateWrite(0)="")  Then
+		MessageBox "Укажите контрольную дату для ознакомления !",0+16+0,CurDb.Title
+		Call uidoc.GotoField("DateWrite")
+	Else
+		'
+		Set DT = New NotesDateTime ("")
+		Call DT.SetNow          
+		'
+		Dim StartDate As NotesDateTime
+		Dim itemDate As NotesItem
+		Set itemDate=doc.GetFirstItem("DateWrite")
+		Set StartDate=itemDate.DateTimeValue
+		If DT.DateOnly<>StartDate.DateOnly Then
+			If DT.TimeDifference( StartDate ) > 0  Then
+				Call doc.ReplaceItemValue("DateWrite",DT.DateOnly)
+				'Messagebox "Контрольная дата ознакомления не может быть меньше текущей даты !",16,DBTitle
+				'Call uidoc.GotoField("DateWrite")			
+				'Exit Sub
+			End If
+		End If
+		'
+		Search=False
+		If (doc.WriteDeliveryLN(0)="")  Then
+			If (doc.WriteGroup(0)="")  Then
+				If doc.UsersDepartment(0)="" Then
+					Search=True					
+				End If
+			End If
+		End If
+    	     ' из АК
+		If (Search)  Then
+			MessageBox "Заполните список рассылки !",16,CurDb.Title
+			Call SelectDlg("SelectViewers","Выберите пользователей")
+		Else
+			If doc.WriteDeliveryLN(0)<>"" Then
+				If doc.CoWrite(0)="0" Then ' Делегирование (согласовывать нелично)			
+
+		
+					i=0
+					ForAll vl In doc.WriteDeliveryLN
+						ReDim Preserve People(i)
+						ReDim Preserve PeopleAlt(i)
+						ReDim Preserve CoPeople(i)
+						Cov=GetFullAssistent(vl,CoAlt)
+						If Cov<>vl Then ' Есть реальный ассистент
+							Call GetUser(vl,Alt,UserPost,UserDepartment)
+							People(i)=Cov
+							CoPeople(i)=vl
+							PeopleAlt(i)=Alt+CoAlt
+						Else ' Всё приходится делать самому !
+							People(i)=vl
+							CoPeople(i)=vl
+							PeopleAlt(i)=CoAlt
+						End If
+						i=i+1
+					End ForAll
+					Call doc.ReplaceItemValue("WriteDeliveryLN",People)
+					Call doc.ReplaceItemValue("CoWriteDeliveryLN",CoPeople)
+					Call doc.ReplaceItemValue("WriteDeliveryAlt",PeopleAlt)	
+				'
+				Else ' Согласовывать лично
+					Call doc.ReplaceItemValue("CoWriteDeliveryLN",doc.WriteDeliveryLN)		
+
+								
+				End If				
+			End If
+			
+			'
+          	'******************************************** Рассылка ************************************	
+			'
+			Dim Resps As NotesDocumentCollection
+			Dim Resp As NotesDocument
+			Set Resps = doc.Responses
+			'
+			Dim Personal As NotesDatabase
+			Set Personal=OpenDBName("bibPersonal")
+			' Рассылочка
+			Dim db As NotesDatabase
+			Set db=doc.ParentDatabase
+			Dim TabNumLookup As NotesView
+			' Для автоподписи и обращения к сотруднику в письме
+			'If Not PersonalDoc Is Nothing Then
+			'	ServerName=db.Server
+			'	vv=PersonalDoc.Files(0)
+			'	Set  Personal = New NotesDatabase( "", "" )
+			'	Call Personal.OpenByReplicaID(ServerName,Left(vv,8)+Right(vv,8))		
+			'	If Personal.IsOpen Then
+			'		Set TabNumLookup=Personal.GetView("People")
+			'	End If		
+			'End If
+			'
+			'******************************** Список пользователей
+			'
+			If (doc.WriteDeliveryLN(0)<>"") Then
+				ForAll UserSend In doc.WriteDeliveryLN
+					Call SendWrite(doc,UserSend)	
+				End ForAll
+			End If
+			'***********************************************************
+			'******************** Группы рассылки 
+			'***********************************************************
+			If (doc.WriteGroup(0)<>"") Then
+				Call GetRes("bibReestr",FileName)
+				If FileName<>"" Then
+					Dim  Reestr As New NotesDatabase( "", "" )
+					Call Reestr.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+					If Reestr.IsOpen Then
+						Dim UnidView As NotesView
+						Set UnidView =Reestr.GetView("UNID")
+						Set item=doc.GetFirstItem("WriteGroupUNID")
+						ForAll v In item.Values
+							Set group=UnidView.GetDocumentByKey(v,True)
+							If Not group Is Nothing Then
+								If (group.Form(0)="GroupSend") Then ' Группа рассылки
+									Current=GetLastIndex(doc)
+									ForAll r In group.WriteDeliveryLN
+										If doc.CoWrite(0)="0" Then ' Делегирование
+											
+
+Ass=GetFullAssistent(r,CoAlt)
+											Find=FindUserLN(doc,Ass,r)
+											If Not Find Then
+												If r=Ass Then
+													Call doc.ReplaceItemValue( "Access_Write"+Cstr(Current), r)									
+												Else
+													Set Access_Group= New NotesItem  (doc, "Access_Write"+Cstr(Current), Ass,1076 )						
+
+	
+												End If
+												'If TabNumLookup Is Nothing Then
+												Call SendWrite(doc,Ass)	
+												'Else
+												'	Call SendWriteUser(doc,Ass,TabNumLookup)	
+												'End If
+												Call doc.Save(True,True)
+												Print Current+"."+Ass									
+											End If
+										Else
+											Find=FindUserLN(doc,r,r)
+											If Not Find Then
+												Call doc.ReplaceItemValue( "Access_Write"+Current, r)
+												'If TabNumLookup Is Nothing Then
+												Call SendWrite(doc,r)	
+												'Else
+												'	Call SendWriteUser(doc,r,TabNumLookup)	
+												'End If
+												Call doc.Save(True,True)
+												Print Current+"."+r									
+											End If
+										End If					
+
+		
+										If Not Find Then
+											Set Access_CoGroup= New NotesItem  (doc, "Access_CoWrite"+Cstr(Current), r,1076 )							
+											Current=Current+1		
+
+						
+										End If
+									End ForAll
+								Else ' Form="ListSend" Лист рассылки
+									Call GetFirstSendTo(CurDb,doc,group,MaxCount,True,Reestr,TabNumLookup)	
+								End If
+							End If							
+						End ForAll
+					End If
+					Delete Reestr
+				End If
+			End If			
+			'
+			' *********************** Структурные подразделения *****************************
+			'
+			If doc.UsersDepartment(0)<>"" Then
+				j=GetLastIndex(doc)
+				m=0
+				ForAll v In doc.UsersStruct
+					'Set Personal = New NotesDatabase(GetServer,doc.UsersFileName(m))		
+
+						
+					Set View=Personal.GetView("PeopleStructMail")
+					Set collection=View.GetAllDocumentsByKey(v,False)
+					If collection.Count>0 Then
+						Set d=collection.GetFirstDocument
+						While Not d Is Nothing 
+							Sending=False
+							If doc.SendType(0)="S" Then
+								Sending=True						
+
+		
+							Else
+								If ((doc.SQ(0)="1") And (d.Originator(0)="1")) Or ((doc.Director(0)="1")And(d.PersCatId(0)="140")) Or ((doc.Chieff(0)="1")And(d.PersCatId(0)="150"))Then
+									Sending=True
+								End If
+							End If
+							
+							If Sending Then
+								
+								If doc.CoWrite(0)="0" Then ' Делегирование
+									
+
+'Ass=GetAssistent(d.LN(0),CoAlt,PersonPost,PersonDepartment)
+									Ass=GetFullAssistent(d.LN(0),CoAlt)
+									Find=FindUserLN(doc,Ass,d.LN(0))	
+									If Not Find Then
+										If Ass=d.LN(0) Then
+											Call doc.ReplaceItemValue("Access_Write"+Cstr(j),d.LN(0))
+										Else
+											Set Access_CoWrite= New NotesItem(doc,"Access_Write"+Cstr(j),Ass,1076)
+										End If
+										'Call SendViewUser(Ass,doc)		
+
+									
+										Call SendWrite(doc,Ass)			
+
+										
+									End If
+								Else ' Нет делегирования
+									Find=FindUserLN(doc,d.LN(0),d.LN(0))	
+									If Not Find Then
+										Call doc.ReplaceItemValue("Access_Write"+Cstr(j),d.LN(0))
+										'Call SendViewUser(d.LN(0),doc)		
+
+									
+										Call SendWrite(doc,d.LN(0))		
+
+						
+									End If
+								End If
+								If Not Find Then
+									Set Access_Write= New NotesItem(doc,"Access_CoWrite"+Cstr(j),d.LN(0),1076)
+									Call doc.Save(True,True)
+									Print CStr(j)+"."+d.LN(0)
+									j=j+1						
+
+			
+								End If
+%REM
+								If j>MaxCount Then
+									doc.WriteSend="1"
+									If doc.Form(0)="Document" Then
+										Set 
+
+NewDoc=doc.CopyToDataBase(CurDb)
+										Call NewDoc.MakeResponse(doc)
+									Else
+										Set 
+
+ParentDoc=CurDb.GetDocumentByUNID(doc.ParentDocumentUNID)
+										Set 
+
+NewDoc=ParentDoc.CopyToDataBase(CurDb)
+										Call 
+
+NewDoc.MakeResponse(ParentDoc)
+									End If
+									NewDoc.SaveOptions="1"
+									NewDoc.Form="ResponseVersion"
+									NewDoc.WriteSend="1"
+									If NewDoc.WriteDeliveryAlt(0)<>"" Then
+										NewDoc.WriteDeliveryAlt=""
+										NewDoc.WriteDeliveryLN=""
+										NewDoc.CoWriteDeliveryLN=""
+									End If						
+
+			
+									i=1			
+									While 
+
+NewDoc.HasItem("Access_Write"+Cstr(i))
+										SG=Cstr(i)
+										Call 
+
+NewDoc.RemoveItem("Access_Write"+SG)
+										Call 
+
+NewDoc.RemoveItem("Access_CoWrite"+SG)
+										i=i+1
+									Wend
+									Call NewDoc.Save(True,True)
+									' Ответные документы
+									Set Responses=doc.Responses
+									Set Response=Responses.GetFirstDocument
+									While Not Response Is Nothing
+										If Response.Form(0)="Comment" Then
+											Set 
+
+NewResponse=Response.CopyToDataBase(CurDb)				
+											Call 
+
+NewResponse.MakeResponse(NewDoc)
+											Call 
+
+NewResponse.Save(True,True)											
+										End If
+										Set 
+
+Response=Responses.GetNextDocument(Response)
+									Wend
+									Set doc=NewDoc
+									j=1
+								End If
+%END REM
+							End If
+							Set d=collection.GetNextDocument(d)
+						Wend
+					End If
+					m=m+1
+					'Call Personal.Close
+				End ForAll				
+			End If
+			'
+			Call doc.RemoveItem("Creators")
+			doc.SaveOptions="1"
+			doc.WriteSend="1"
+			If Closed Then
+				Call doc.Save(True,True)
+				doc.SaveOptions="0"
+				Call uidoc.Close				
+			End If
+		End If
+	End If
+End Sub
+
+
+Sub SendToViewList(Closed As Boolean)
+ Dim w As New NotesUIWorkspace
+ Dim uidoc As NotesUIDocument
+ Dim doc As NotesDocument,group As NotesDocument
+ Set uidoc=w.CurrentDocument
+ Set doc=uidoc.Document
+ Dim db As NotesDatabase
+ Set db=doc.Parentdatabase
+ If doc.ViewLN(0)<>"" Then
+		If doc.CoRead(0)="0" Then ' Делегирование (согласовывать нелично)					
+			i=0
+			ForAll vl In doc.ViewLN
+				ReDim Preserve People(i)
+				ReDim Preserve PeopleAlt(i)
+				ReDim Preserve CoPeople(i)
+				Cov=GetFullAssistent(vl,CoAlt)
+				If Cov<>vl Then ' Есть реальный ассистент
+					Call GetUser(vl,Alt,UserPost,UserDepartment)
+					People(i)=Cov
+					CoPeople(i)=vl
+					PeopleAlt(i)=Alt+CoAlt
+				Else ' Всё приходится делать самому !
+					People(i)=vl
+					CoPeople(i)=vl
+					PeopleAlt(i)=CoAlt
+				End If
+				i=i+1
+			End ForAll
+			Call doc.ReplaceItemValue("ViewLN",People)
+			Call doc.ReplaceItemValue("CoViewLN",CoPeople)
+			Call doc.ReplaceItemValue("ViewAlt",PeopleAlt)	
+		Else ' Согласовывать лично
+			Call doc.ReplaceItemValue("CoViewLN",doc.ViewLN)						
+		End If				
+		doc.ViewSend="1"
+		doc.SaveOptions="1"
+		Call doc.Save(True,True)		
+		For m=0 To UBound(doc.ViewLN)
+			Call SendView(doc,doc.ViewLN(m))					
+		Next					
+		
+		
+	End If
+	'***********************************************************
+	'******************** Группы рассылки 
+	'***********************************************************
+	If (doc.ReadGroup(0)<>"") Then
+	 Dim FileName As String
+	 Call GetRes("bibReestr",FileName)
+	 If FileName<>"" Then
+	  Dim  Reestr As New NotesDatabase( "", "" )
+	  Call Reestr.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+	  If Reestr.IsOpen Then
+	   Dim UnidView As NotesView
+	   Set UnidView =Reestr.GetView("UNID")
+	   Set item=doc.GetFirstItem("ReadGroupUNID")
+	   ForAll v In item.Values
+		Set group=UnidView.GetDocumentByKey(v,True)
+		If Not group Is Nothing Then
+		 If (group.Form(0)="GroupSend") Then ' Группа рассылки
+		  Current=GetLastReadIndex(doc)
+		  ForAll r In group.WriteDeliveryLN
+			If doc.CoRead(0)="0" Then ' Делегирование
+			 Ass=GetFullAssistent(r,CoAlt)
+			 Find=FindUserReadLN(doc,Ass,r)
+			 If Not Find Then
+			  If r=Ass Then
+			   Call doc.ReplaceItemValue( "Access_Read"+Cstr(Current), r)									
+			  Else
+			   Set Access_Group= New NotesItem  (doc, "Access_Read"+Cstr(Current), Ass,1076 )						
+			  End If
+    		   Call SendView(doc,Ass)	
+			  doc.ViewSend="1"
+			  doc.SaveOptions="1"
+			  Call doc.Save(True,True)
+			  Print Current+"."+Ass									
+			 End If
+			Else
+			 Find=FindUserReadLN(doc,r,r)
+			 If Not Find Then
+			  Call doc.ReplaceItemValue( "Access_Read"+Current, r)
+			  Call SendView(doc,r)	
+			   doc.ViewSend="1"
+			  doc.SaveOptions="1"
+			  Call doc.Save(True,True)
+			  Print Current+"."+r									
+			 End If
+			End If					
+			If Not Find Then
+ 			 Set Access_CoGroup= New NotesItem  (doc, "Access_CoRead"+Cstr(Current), r,1076 )
+ 			 Call doc.Save(True,True)							
+			 Current=Current+1		
+			End If
+		   End ForAll
+		  Else ' Form="ListSend" Лист рассылки
+			Call GetFirstSendToRead(Db,doc,group,True,Reestr)	
+		  End If
+		 End If							
+		End ForAll
+	   End If
+	   Delete Reestr
+	  End If
+	End If
+ If Closed Then
+  Call doc.Save(True,True)
+  doc.SaveOptions="0"
+  Call uidoc.Close				
+ End If	
+End Sub
+
+
+Sub GetFirstSendToRead(db As NotesDatabase,doc As NotesDocument,group As NotesDocument,Sending As Integer,Reestr As NotesDatabase)
+	Dim item As NotesItem,SendTo As NotesItem,Post As NotesItem,Department As NotesItem
+	Dim CoAlt As String
+	Dim Access_Group As NotesItem
+	Dim PersonPost As String,PersonDepartment As String
+	Set item=group.GetFirstItem("GroupUNID")					
+	ForAll v In item.Values
+		Dim Document As NotesDocument
+		Set Document=Reestr.GetDocumentByUNID(v)	
+		If (Document.Form(0)="GroupSend") Then ' Группа рассылки
+			Current=GetLastReadIndex(doc)
+			ForAll r In Document.WriteDeliveryLN
+				If doc.CoRead(0)="0" Then ' Делегирование
+					Ass=GetFullAssistent(r,CoAlt)
+					Find=FindUserReadLN(doc,Ass,r)
+					If Not Find Then
+						If r=Ass Then
+							Call doc.ReplaceItemValue( "Access_Read"+Current, r)		
+						Else
+							Set Access_Group= New NotesItem  (doc,"Access_Read"+Current, Ass,1076 )							
+						End If
+						Set Access_CoGroup= New NotesItem  (doc, "Access_CoRead"+Current,r,1076 )
+						If Sending Then
+						 Call SendView(doc,Ass)	
+						End If
+						Print Current+"."+r					
+						doc.ViewSend="1"	
+						Call doc.Save(True,True)
+					End If
+				Else
+					Find=FindUserReadLN(doc,r,r)
+					If Not Find Then
+						Call doc.ReplaceItemValue( "Access_Read"+Current, r)
+						Set Access_CoGroup= New NotesItem  (doc, "Access_CoRead"+Current,r,1076 )
+						If Sending Then
+						 Call SendView(doc,r)	
+						End If
+						doc.ViewSend="1"	
+						Call doc.Save(True,True)
+					End If
+				End If							
+				If Not Find Then
+					Current=Current+1					
+				End If
+			End ForAll
+		Else ' Лист рассылки
+			Call GetFirstSendToRead(db,doc,Document,Sending,Reestr)	
+		End If
+	End ForAll
+End Sub
+Sub CreateTaskInCalendar()
+	Dim w As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim doc As NotesDocument
+	
+	Set uidoc = w.CurrentDocument 
+	Set doc=uidoc.Document
+	'
+	Dim session As New NotesSession
+	'
+	Dim RTStyle As NotesRichTextStyle,RTStyleBold As NotesRichTextStyle
+	'
+	Set RTStyle =session.CreateRichTextStyle
+	Let RTStyle.NotesColor = COLOR_BLACK
+	Let RTStyle.Bold = False
+	Let RTStyle.FontSize = 8
+	Let RTStyle.NotesFont = FONT_HELV
+	'
+	Set RTStyleBold =session.CreateRichTextStyle
+	Let RTStyleBold.NotesColor = COLOR_BLACK
+	Let RTStyleBold.Bold = True
+	Let RTStyleBold.FontSize = 8
+	Let RTStyleBold.NotesFont = FONT_HELV
+	'	
+	Dim Body As NotesRichTextItem
+	
+	Dim maildb As NotesDatabase
+	Set maildb = New NotesDatabase("","")
+	maildb.OpenMail
+	Dim TaskDoc As NotesDocument,TmpDoc As NotesDocument
+	Set TaskDoc=maildb.CreateDocument
+	Set TmpDoc=maildb.CreateDocument
+	Call TaskDoc.ReplaceItemValue("Form","Task")
+	Call TaskDoc.ReplaceItemValue("Subject",doc.Subject(0)) ' Тема задачи
+	Call TaskDoc.ReplaceItemValue("Categories",doc.Category(0)) ' Категория документа
+	Set Body=TaskDoc.CreateRichTextItem("Body")
+	'
+	Call Body.AppendStyle (RTStyle)
+	Call Body.AppendDocLink(doc,doc.Subject(0))
+	Call Body.AppendText ( { - Заголовок документа: "}+doc.Subject(0)+{", автор: }+doc.AuthorAlt(0))
+	CountRow=1
+	' 1. Дата введения
+	If CStr(doc.DateReturn(0))<>"" Then
+    	CountRow=CountRow+1
+	End If
+	' 2. Цель
+	If doc.Target(0)<>"" Then
+		CountRow=CountRow+1
+	End If
+	' 3. Категория			
+	If doc.Category(0)<>"" Then
+	 CountRow=CountRow+1
+	End If
+	' 4. Тип
+	If doc.DocType(0)<>"" Then
+		CountRow=CountRow+1
+	End If
+	' Таблица
+	Dim CountColumn As Integer
+	CountColumn=2
+	Dim styles(1 To 2) As NotesRichTextParagraphStyle
+	' Первый столбец
+	ii% = 1
+	Set styles(ii%) = session.CreateRichTextParagraphStyle
+	styles(ii%).LeftMargin = 0
+	styles(ii%).FirstLineLeftMargin = 0
+	styles(ii%).RightMargin = RULER_ONE_INCH * 1.5
+	styles(ii%).Alignment=2
+	' Второй стлбец
+	ii% = 2
+	Set styles(ii%) = session.CreateRichTextParagraphStyle
+	styles(ii%).LeftMargin = 0
+	styles(ii%).FirstLineLeftMargin = 0
+	styles(ii%).RightMargin = RULER_ONE_INCH * 3.0
+	styles(ii%).Alignment=2
+	'
+	'Call Body.AppendTable(CountRow, CountColumn,, RULER_ONE_INCH * 1.7,styles)
+	Call Body.AppendTable(CountRow, CountColumn,,,styles)
+	 Dim rtnav As NotesRichTextNavigator
+	 Set rtnav = Body.CreateNavigator
+	 Call rtnav.FindFirstElement(RTELEM_TYPE_TABLECELL)
+		 Call Body.BeginInsert(rtnav)
+		 Call Body.AppendStyle (RTStyle)
+		 Call Body.AppendText("Дата создания:")
+		 Call Body.EndInsert
+		Call SetNextCellText(rtnav,Body,doc.DateCreated(0))	
+				 Call Body.AppendStyle (RTStyleBold)
+	' 1. Дата введения
+	If CStr(doc.DateReturn(0))<>"" Then
+	 Call SetNextCellText(rtnav,Body,"Дата:")					' № п\п
+	 Call SetNextCellText(rtnav,Body,CStr(doc.DateReturn(0)))					' № п\п
+	End If
+	' 2. Цель
+	If doc.Target(0)<>"" Then
+	 Call SetNextCellText(rtnav,Body,"Цель:")					' № п\п
+	 Call SetNextCellText(rtnav,Body,doc.Target(0))					' № п\п
+	End If
+	' 3. Категория			
+	If doc.Category(0)<>"" Then
+	 Call SetNextCellText(rtnav,Body,"Категория:")					' № п\п
+	 Call SetNextCellText(rtnav,Body,doc.Category(0))					' № п\п
+	End If
+	' 4. Тип
+	If doc.DocType(0)<>"" Then
+	 Call SetNextCellText(rtnav,Body,"Тип:")					' № п\п
+	 Call SetNextCellText(rtnav,Body,doc.DocType(0))					' № п\п
+	End If
+	' Сроки согласования
+	Status=doc.Status(0)
+	If (Status="E")Or(Status="A")Or(Status="P") Then
+		If doc.GetItemValue ("IsReviewTerm")(0) <> "0" Then
+			Dim DT As NotesDateTime
+			Dim item As NotesItem
+			Set item=doc.GetFirstItem("DateSended")
+			Set DT = item.DateTimeValue
+			Call TaskDoc.ReplaceItemValue("StartDate",DT.DateOnly)
+			'
+			If doc.Weekend(0)="0" Then
+				days = CInt (doc.ReviewTime (0))+GetWeekend(doc,"DateSended",doc.ReviewTime(0))
+			Else
+				days = CInt (doc.ReviewTime (0))
+			End If
+			Call DT.AdjustDay (days)
+			Call TaskDoc.ReplaceItemValue("DueDate",DT.DateOnly)
+		End If		
+	End If	
+	Call Body.CopyItemToDocument(TmpDoc,"Body")
+	'
+	Dim TaskUIDoc As NotesUIDocument
+	Set TaskUIDoc=w.EditDocument(True,TaskDoc)
+End Sub
+
+Sub SelectBE
+	Dim w As New NotesUIWorkspace
+	Dim doc As NotesDocument
+	Set doc=w.CurrentDocument.Document
+	Dim FileName As String		
+	Dim Reestr As  NotesDatabase
+	Set Reestr=doc.ParentDatabase
+	If Reestr.IsOpen Then
+		Dim collection As NotesDocumentCollection
+		Set collection = w.PickListCollection(PICKLIST_CUSTOM, False,Reestr.Server,Reestr.FilePath,"BE","Компании" ,"Выберите компанию")
+		If collection.Count>0 Then
+			Call doc.ReplaceItemValue("BE",collection.GetFirstDocument.Names(0))		
+		End If
+	End If		
+End Sub
+
+Sub SelectPeople()
+ Dim session As New NotesSession  ' Текущая сессия
+ Dim w As New NotesUIWorkSpace
+ Dim uidoc As NotesUIDocument
+ Dim db As NotesDatabase
+ Dim collection As NotesDocumentCollection
+ '
+ Set uidoc=w.CurrentDocument
+ '
+ Set db=session.CurrentDatabase
+ Dim FindDoc As NotesDocument
+ Dim FileName As String		
+ Call GetRes("bibPersonal",FileName)
+ If FileName<>"" Then
+  Dim AK As New NotesDatabase( "", "" )
+  Call AK.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+  If AK.IsOpen Then
+   Set collection = w.PickListCollection(1, False,AK.Server,AK.FilePath,"ByAllPeople" ,"Список сотрудников","Выберите сотрудника")
+   If collection.Count>0 Then
+    '		
+    Dim Doc As NotesDocument,CurrentDoc As NotesDocument
+    Dim CurrentUIDoc As NotesUIDocument
+    Dim AltFullName As String
+    '
+    Set Doc = collection.GetFirstDocument()
+    If Doc.Form(0)="Person" Then
+     '
+     Set CurrentUIDoc=w.CurrentDocument
+     CurrentUIDoc.EditMode=True
+     Set CurrentDoc=CurrentUIDoc.Document
+     FormName=CurrentDoc.Form(0)
+     '
+     Call CurrentDoc.ReplaceItemValue("UsDepartment",doc.Division(0))
+     Call CurrentDoc.ReplaceItemValue("UsStruct",doc.Struct(0))
+     Call CurrentDoc.ReplaceItemValue("UsPost",doc.Post(0))
+     Call CurrentDoc.ReplaceItemValue("UsFileTitle",AK.Title)
+     Call CurrentDoc.ReplaceItemValue("UsLN",doc.LN(0))
+     Call CurrentDoc.ReplaceItemValue("UsTabNum",doc.TabNum(0))
+     AltFullName=doc.SurName(0)+" "+doc.FirstName(0)+" "+doc.SecondName(0)		
+     Call CurrentDoc.ReplaceItemValue("UsAlt",AltFullName)
+     If doc.Tel2(0)="" Then
+      Call CurrentDoc.ReplaceItemValue("Tel",doc.Tel1(0))
+     Else
+      If doc.Tel1(0)="" Then
+       Call CurrentDoc.ReplaceItemValue("Tel",doc.Tel2(0))
+      Else
+       Call CurrentDoc.ReplaceItemValue("Tel",doc.Tel1(0)+", "+doc.Tel2(0))
+      End If
+     End If
+     Call CurrentUIDoc.Refresh()
+    End If
+   End If
+  End If
+ End If
+End Sub
+
+Sub SelectRouterBOSS()
+	Dim session As New NotesSession  ' Текущая сессия
+	Dim w As New NotesUIWorkspace
+	Dim uidoc As NotesUIDocument
+	Dim db As NotesDatabase
+	Dim collection As NotesDocumentCollection
+	'
+	Set uidoc=w.CurrentDocument
+	'
+	Set db=session.CurrentDatabase
+	Dim FindDoc As NotesDocument
+	Dim FileName As String		
+	Call GetRes("bibPersonal",FileName)
+	If FileName<>"" Then
+		Dim AK As New NotesDatabase( "", "" )
+		Call AK.OpenByReplicaID(db.Server,Left(FileName,8)+Right(FileName,8))
+		If AK.IsOpen Then
+			Set collection = w.PickListCollection(1, False,AK.Server,AK.FilePath,"ByPeople" ,"Список сотрудников","Выберите руководителя, имеющего право подписи")
+			If collection.Count>0 Then
+				'		
+				Dim Doc As NotesDocument,CurrentDoc As NotesDocument
+				Dim CurrentUIDoc As NotesUIDocument
+				Dim AltFullName As String
+				'
+				Set Doc = collection.GetFirstDocument()
+				If Doc.Form(0)="Person" Then
+					'
+					Set CurrentUIDoc=w.CurrentDocument
+					CurrentUIDoc.EditMode=True
+					Set CurrentDoc=CurrentUIDoc.Document
+					'
+					Call CurrentDoc.ReplaceItemValue("BOSSDepartment",doc.Division(0))
+					Call CurrentDoc.ReplaceItemValue("BOSSStruct",doc.Struct(0))
+					Call CurrentDoc.ReplaceItemValue("BOSSPost",doc.Post(0))
+					Call CurrentDoc.ReplaceItemValue("BOSSFileTitle",AK.Title)
+					Call CurrentDoc.ReplaceItemValue("BOSSLN",doc.LN(0))
+					Call CurrentDoc.ReplaceItemValue("BOSSTabNum",doc.TabNum(0))
+					AltFullName=doc.SurName(0)+" "+doc.FirstName(0)+" "+doc.SecondName(0)		
+					Call CurrentDoc.ReplaceItemValue("BOSSAlt",AltFullName)
+    '
+					Call CurrentDoc.ReplaceItemValue("ReviewersPost",CurrentDoc.ReviewersPost)
+					Call CurrentDoc.ReplaceItemValue("ReviewersDepartment",CurrentDoc.ReviewersDepartment)
+    					' Маршрут согласования
+					Redim Reviewers(0)
+					Redim ReviewersAlt(0)
+					Redim ReviewersPost(0)
+					Redim ReviewersDepartment(0)
+					j=0
+    					' Линейный руководитель - первый рецензент
+					If CurrentDoc.BOSSLN(0)<>"" Then
+						Reviewers(0)=CurrentDoc.BOSSLN(0)
+						ReviewersAlt(0)=CurrentDoc.BOSSAlt(0)
+						ReviewersPost(0)=CurrentDoc.BOSSPost(0)
+						ReviewersDepartment(0)=CurrentDoc.BOSSDepartment(0)
+						j=j+1
+					End If
+    					' Рецензенты из шаблона - последующие рецензенты
+					Dim UNID As NotesView
+					Set UNID=db.GetView("UNID")
+					Dim TemplateDoc As NotesDocument
+					Set TemplateDoc=UNID.GetDocumentByKey(CurrentDoc.TemplateUNID(0),True)
+					If Not TemplateDoc Is Nothing Then
+						If TemplateDoc.Reviewers(0)<>"" Then
+							Forall v In TemplateDoc.Reviewers
+								LN=GetUser(v,Alt,Post,Department)
+								If LN<>"" Then
+									Redim Preserve Reviewers(j)
+									Redim Preserve ReviewersAlt(j)
+									Redim Preserve ReviewersPost(j)
+									Redim Preserve ReviewersDepartment(j)
+									Reviewers(j)=LN
+									ReviewersAlt(j)=Alt
+									ReviewersPost(j)=Post
+									ReviewersDepartment(j)=Department
+									j=j+1
+								End If
+							End Forall
+						End If
+					End If
+					'
+					Call CurrentDoc.ReplaceItemValue("Reviewers",Reviewers)
+					Call CurrentDoc.ReplaceItemValue("ReviewersAlt",ReviewersAlt)
+					Call CurrentDoc.ReplaceItemValue("ReviewersPost",ReviewersPost)
+					Call CurrentDoc.ReplaceItemValue("ReviewersDepartment",ReviewersDepartment)
+					Call CurrentUIDoc.Refresh()
+				End If
+			End If
+		End If
+	End If
+End Sub
+
+Sub NewVersionField(EditionDoc As NotesDocument,doc As NotesDocument)
+	Call EditionDoc.ReplaceItemValue("Subject",doc.Subject(0))						' Заголовок документа
+	'
+	Call EditionDoc.ReplaceItemValue("DocType",doc.DocType(0))					' Тип документа
+	Call EditionDoc.ReplaceItemValue("Title",doc.Title(0))								' Преимущества, основание для изменений				
+	Call EditionDoc.ReplaceItemValue("Office",doc.Office)					               ' Регистраторы	
+End Sub
+
+Sub RegistryUser(uidoc As NotesUIDocument,NotesName As Variant)
+ Dim w As New NotesUIWorkspace
+ Dim Category As NotesDocument,doc As NotesDocument
+ Dim db As NotesDatabase
+ '
+ Set doc=uidoc.Document
+ Set db=doc.ParentDatabase
+ uidoc.EditMode=True
+ Dim UNID As NotesView
+ Set UNID=db.GetView("UNID")
+ '
+ Set Category=UNID.GetDocumentByKey(doc.CategoryUNID(0))
+ If Not Category Is Nothing Then
+  '
+  '********** Зарегистрировать служебную записку
+  '
+  Dim RegNum As Integer,Mantissa As Integer
+  Dim Reg As String,Prefix As String,Postfix As String
+  RegNum=Category.Num_Index(0)
+  '	
+  Mantissa=Category.Num_Mantissa(0)
+  Prefix=Category.Num_Prefix(0)
+  Postfix=Category.Num_Postfix(0)
+  'Reg=Right$ (String$ (Mantissa , "0") & Trim$ (Str$ (RegNum)) , Mantissa)
+  ' Текущий номер заявки
+  if Len(Trim$ (Str$ (RegNum)))< Mantissa then ' Номер требует форматирования
+   Reg=Right$ (String$ (Mantissa , "0") & Trim$ (Str$ (RegNum)) , Mantissa)
+  Else
+   Reg= Trim$ (Str$ (RegNum))
+  End if
+  Number=Trim(Prefix)+Cstr(Reg)
+  index=Number+Trim(Postfix)
+  '
+  Call doc.ReplaceItemValue ("RegNum" , index)
+  ' Инкремент регистратора
+  Call Category.ReplaceItemValue ("Num_Index" , Cint(Reg)+1)	
+  Call Category.Save(True,True)
+ End If
+ Call RefreshLog(doc,"DateReg","Registrator","R")
+ Call doc.Save(True,True)
+End Sub
+
